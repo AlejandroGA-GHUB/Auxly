@@ -1,0 +1,30 @@
+# PLANNING FILES
+CLAUDE.md
+plan.md
+
+# EDITOR SETTINGS
+.vscode/
+
+# SECRETS
+.env
+
+# PYTHON
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# SPOTIPY TOKEN CACHE
+.cache
+
+# LOCAL PROFILE/PLAYLIST DATABASE
+auxly.db
+
+# STORED AUDIO FILES (a!playlist addfile)
+audio_files/
+
+# BOT OUTPUT WHEN LAUNCHED WINDOWLESS (auxly_start.bat)
+auxly.log
+
+# CLAUDE SETTINGS
+.claude

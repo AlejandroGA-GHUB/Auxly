@@ -1,0 +1,6 @@
+1.0.0
+
+This is Auxly's release version. The bot reads the first line at startup
+and compares it against the latest release on GitHub to tell you when an
+update is out. Please don't edit this file: changing the number won't
+unlock anything, it just makes your bot mis-report whether it's up to date.
