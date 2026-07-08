@@ -12,7 +12,7 @@ echo.
 echo Checking for yt-dlp updates...
 set "YTDLP_OLD="
 for /f "delims=" %%v in ('python -c "import yt_dlp; print(yt_dlp.version.__version__)" 2^>nul') do set "YTDLP_OLD=%%v"
-python -m pip install -U yt-dlp --quiet --disable-pip-version-check
+python -m pip install -U yt-dlp yt-dlp-ejs --quiet --disable-pip-version-check
 set "YTDLP_NEW="
 for /f "delims=" %%v in ('python -c "import yt_dlp; print(yt_dlp.version.__version__)" 2^>nul') do set "YTDLP_NEW=%%v"
 if "%YTDLP_OLD%"=="%YTDLP_NEW%" (

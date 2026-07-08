@@ -26,19 +26,32 @@ rem What's already here? (the Microsoft Store python stub exits nonzero,
 rem so a plain version check correctly treats it as missing)
 set "HAVE_PYTHON=1"
 set "HAVE_FFMPEG=1"
+set "HAVE_DENO=1"
 python --version >nul 2>&1 || set "HAVE_PYTHON="
 ffmpeg -version >nul 2>&1 || set "HAVE_FFMPEG="
+deno --version >nul 2>&1 || set "HAVE_DENO="
 
-if defined HAVE_PYTHON if defined HAVE_FFMPEG goto :deps
+if defined HAVE_PYTHON if defined HAVE_FFMPEG if defined HAVE_DENO goto :deps
 
-winget --version >nul 2>&1
-if errorlevel 1 (
+set "HAVE_WINGET=1"
+winget --version >nul 2>&1 || set "HAVE_WINGET="
+
+if not defined HAVE_WINGET (
     echo This script uses winget to install missing programs, but winget
     echo was not found on this PC. Install these manually instead:
     echo.
     if not defined HAVE_PYTHON echo    Python 3.11+ - https://www.python.org/downloads/
     if not defined HAVE_FFMPEG echo    FFmpeg - https://ffmpeg.org/download.html - must be on PATH
+    if not defined HAVE_DENO echo    Deno - https://deno.com - yt-dlp uses it for smooth YouTube audio
     echo.
+)
+rem Deno is recommended, not required - only Python/FFmpeg block the setup.
+if not defined HAVE_WINGET if defined HAVE_PYTHON if defined HAVE_FFMPEG (
+    echo Deno can be added any time - continuing setup without it.
+    echo.
+    goto :deps
+)
+if not defined HAVE_WINGET (
     echo Then double-click setup.bat again.
     pause
     exit /b 1
@@ -51,6 +64,10 @@ if not defined HAVE_PYTHON (
 if not defined HAVE_FFMPEG (
     echo Installing FFmpeg...
     winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements
+)
+if not defined HAVE_DENO (
+    echo Installing Deno - yt-dlp uses it for smooth YouTube audio...
+    winget install -e --id DenoLand.Deno --accept-source-agreements --accept-package-agreements
 )
 
 rem A freshly installed Python isn't visible to THIS window (PATH is read

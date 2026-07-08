@@ -652,23 +652,84 @@ class Profiles(commands.Cog):
         await ctx.send(f"🔃 Swapped **{t1}** ↔ **{t2}** in **{name}**.")
 
     @playlist.command(name="remove",
-                      help="Remove song N from your playlist (see numbers in "
-                           "a!playlist view).")
+                      help="Remove songs by number (see a!playlist view) — "
+                           "a!playlist remove <name> 3 or "
+                           "a!playlist remove <name> 3 9 14.")
     async def playlist_remove(self, ctx: commands.Context, *, args: str):
-        parsed = await self._split_trailing_ints(
-            ctx, args, 1, "a!playlist remove <name> <n>")
-        if parsed is None:
-            return
-        name, (index,) = parsed
+        usage = "a!playlist remove <name> <n> [n ...]"
+        # Longest prefix that names one of your playlists (so names ending
+        # in numbers, like "Top 40", still work); leftovers are the slots.
         try:
-            title, file = await _db(storage.remove_song, ctx.author.id, name,
-                                    index)
+            match = await self._match_playlist(ctx.author.id, args.split())
         except storage.StorageError as e:
             await ctx.send(f"⚠️ {e}")
             return
-        if file:
-            await asyncio.to_thread(_delete_stored, [file])
-        await ctx.send(f"🗑️ Removed **{title}** from **{name}**.")
+        if match is None:
+            await ctx.send(
+                "That doesn't start with one of your playlists — check "
+                "`a!playlist view`."
+            )
+            return
+        name, rest = match
+        if not rest or not all(t.isdigit() for t in rest):
+            await ctx.send(f"Usage: `{usage}`.")
+            return
+        indexes = sorted({int(t) for t in rest})
+        try:
+            valid, titles, files = await _db(storage.remove_songs,
+                                             ctx.author.id, name, indexes)
+        except storage.StorageError as e:
+            await ctx.send(f"⚠️ {e}")
+            return
+        if files:
+            await asyncio.to_thread(_delete_stored, files)
+        if len(titles) == 1:
+            msg = f"🗑️ Removed **{titles[0]}** from **{name}**."
+        else:
+            msg = (f"🗑️ Removed **{len(titles)}** songs (slots "
+                   f"{', '.join(str(i) for i in valid)}) from **{name}**.")
+        skipped = len(indexes) - len(valid)
+        if skipped:
+            msg += (f" Skipped {skipped} number{'s' if skipped != 1 else ''} "
+                    f"outside the playlist.")
+        await ctx.send(msg)
+
+    @playlist.command(name="removerange",
+                      help="Remove songs X through Y from your playlist — "
+                           "a!playlist removerange <name> 2 5 and "
+                           "a!playlist removerange <name> 2-5 both work.")
+    async def playlist_remove_range(self, ctx: commands.Context, *, args: str):
+        usage = "a!playlist removerange <name> <x> <y>"
+        # Same two spellings as a!removerange: trailing "2 5" or "2-5".
+        tokens = args.split()
+        m = re.fullmatch(r"(\d+)-(\d+)", tokens[-1]) if tokens else None
+        if m and len(tokens) >= 2:
+            name = _norm(" ".join(tokens[:-1]))
+            start, end = int(m.group(1)), int(m.group(2))
+        else:
+            parsed = await self._split_trailing_ints(ctx, args, 2, usage)
+            if parsed is None:
+                return
+            name, (start, end) = parsed
+        if start > end:
+            await ctx.send(
+                "The first slot must be less than or equal to the second.")
+            return
+        try:
+            titles, files = await _db(storage.remove_song_range,
+                                      ctx.author.id, name, start, end)
+        except storage.StorageError as e:
+            await ctx.send(f"⚠️ {e}")
+            return
+        if files:
+            await asyncio.to_thread(_delete_stored, files)
+        if len(titles) == 1:
+            await ctx.send(f"🗑️ Removed **{titles[0]}** from **{name}**.")
+        else:
+            await ctx.send(
+                f"🗑️ Removed **{len(titles)}** songs (slots {start}–{end}) "
+                f"from **{name}**."
+            )
 
     @playlist.command(name="rename",
                       help="Rename a playlist: a!playlist rename <old> <new>.")
@@ -875,7 +936,10 @@ class Profiles(commands.Cog):
             "order you list them.",
             "`a!playlist move <name> <from> <to>` — Move a song to another slot.",
             "`a!playlist swap <name> <x> <y>` — Swap two songs' slots.",
-            "`a!playlist remove <name> <n>` — Remove song n from your playlist.",
+            "`a!playlist remove <name> <n> [n ...]` — Remove songs by number; "
+            "`a!playlist remove ost 3 9 14` removes all three.",
+            "`a!playlist removerange <name> <x> <y>` — Remove songs x through "
+            "y (`2 5` or `2-5` both work).",
             "`a!save <playlist>` — Save the **currently playing** song to "
             "your playlist.",
             "`a!playlist rename <old> <new>` — Rename your playlist.",

@@ -14,8 +14,8 @@ playlists, plain search terms, and your own audio files.
 > setup* below and start the bot with `python bot.py`.
 
 1. **Run `setup.bat`** (double-click). It installs everything the bot needs
-   (Python, FFmpeg, and the Python packages), skipping anything you already
-   have. It then creates your `.env` file and opens it in Notepad, ready for
+   (Python, FFmpeg, Deno, and the Python packages), skipping anything you
+   already have. It then creates your `.env` file and opens it in Notepad, ready for
    the token from step 2. If it had to install Python, it will ask you to
    run it a second time, since new installs aren't visible to an
    already-open window. It uses winget, which Windows 10/11 ships with. If
@@ -51,6 +51,10 @@ playlists, plain search terms, and your own audio files.
 1. Install [Python 3.11+](https://www.python.org/downloads/) and
    [FFmpeg](https://ffmpeg.org/download.html). FFmpeg must be on your
    PATH (`ffmpeg -version` should work in a terminal).
+   Also recommended: [Deno](https://deno.com), a JavaScript runtime that
+   yt-dlp uses to solve YouTube's stream challenges. The bot runs without
+   it, but YouTube may throttle the audio stream (playback stutter) when
+   it's missing.
 2. Install the Python packages:
    ```
    pip install -r requirements.txt
@@ -64,8 +68,8 @@ playlists, plain search terms, and your own audio files.
 ## Launch
 
 Double-click **`auxly_start.bat`**. The launcher shows which Auxly version
-you're running, then quietly checks for yt-dlp updates (takes about 2
-seconds, does nothing if you're current).
+you're running, then quietly checks for updates to yt-dlp and its solver
+scripts (takes about 2 seconds, does nothing if you're current).
 YouTube changes things often and a stale yt-dlp is the most common way any
 music bot breaks, so this keeps Auxly self-healing. It also shows how much
 disk the bot is using (database plus stored audio files), then starts the
@@ -124,7 +128,7 @@ first launch (Discord-side propagation, one time only).
 | `a!shuffle` | Shuffle the queue (playing song keeps playing) |
 | `a!move <n>` | Move queue slot n to the front (plays next) |
 | `a!save <playlist>` | Save the **currently playing** song to your playlist |
-| `a!remove <n>` | Remove queue slot n (1 = next up) |
+| `a!remove <n> [n ...]` | Remove queue slots by number (1 = next up); `a!remove 2 5 9` removes all three |
 | `a!removerange <x> <y>` | Remove queue slots x through y (`2 5` or `2-5` both work) |
 | `a!clear` | Empty the queue (keeps the playing song) |
 | `a!nowplaying` | Current song + elapsed time |
@@ -165,7 +169,8 @@ be queued anytime, on any server the bot is in.
 | `a!playlist play [profile] <name> <n> <n> ...` | Queue just those numbered songs from a playlist (numbers from `a!playlist view`), in the order you list them |
 | `a!playlist move <name> <from> <to>` | Move a song to another slot |
 | `a!playlist swap <name> <x> <y>` | Swap two songs' slots |
-| `a!playlist remove <name> <n>` | Remove song n from your playlist |
+| `a!playlist remove <name> <n> [n ...]` | Remove songs by number — `a!playlist remove ost 3 9 14` removes all three |
+| `a!playlist removerange <name> <x> <y>` | Remove songs x through y (`2 5` or `2-5` both work) |
 | `a!playlist rename <old> <new>` | Rename your playlist |
 | `a!playlist clear <name>` | Remove all songs from your playlist (keeps the playlist) |
 | `a!playlist delete <name>` | Delete your playlist |
@@ -251,5 +256,9 @@ Discord, `a!devhelp` lists them all.
 - **A specific video fails** → update yt-dlp: `pip install -U yt-dlp`.
   YouTube changes things and yt-dlp updates frequently. `auxly_start.bat`
   already does this at every launch, so a restart usually fixes it.
+- **YouTube songs stutter or drift in speed while local files play fine** →
+  YouTube is throttling the stream, which happens when yt-dlp can't solve
+  YouTube's stream challenges. Make sure Deno is installed (`deno --version`
+  in a terminal; re-run `setup.bat` to get it) and restart the bot.
 - **Something else** → open an issue on this repo with what you ran and
   what happened.

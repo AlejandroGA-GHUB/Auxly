@@ -439,29 +439,50 @@ def swap_songs(user_id: int, playlist: str, a: int, b: int) -> tuple[str, str]:
     return titles
 
 
-def remove_song(user_id: int, playlist: str, index: int) -> tuple[str, str | None]:
-    """Remove the index-th song (1-based). Returns (title, stored-file source
-    whose disk file the caller must delete — None for normal songs)."""
+def remove_songs(user_id: int, playlist: str, indexes: list[int]
+                 ) -> tuple[list[int], list[str], list[str]]:
+    """Remove songs by 1-based slot — duplicates deduped, out-of-range slots
+    skipped. Returns (slots actually removed ascending, their titles,
+    stored-file sources whose disk files the caller must delete)."""
     with _lock:
         conn = _db()
         cur = conn.cursor()
         pid = _playlist_id(cur, user_id, playlist)
-        row = cur.execute(
+        rows = cur.execute(
             "SELECT id, title, source, stored_file FROM songs "
-            "WHERE playlist_id = ? ORDER BY position LIMIT 1 OFFSET ?",
-            (pid, index - 1),
-        ).fetchone()
-        if row is None:
-            count = cur.execute(
-                "SELECT COUNT(*) FROM songs WHERE playlist_id = ?", (pid,)
-            ).fetchone()[0]
+            "WHERE playlist_id = ? ORDER BY position", (pid,)
+        ).fetchall()
+        valid = [i for i in sorted(set(indexes)) if 1 <= i <= len(rows)]
+        if not valid:
             raise StorageError(
-                f"**{playlist}** has {count} song{'s' if count != 1 else ''} — "
-                f"pick a valid slot."
+                f"**{playlist}** has {len(rows)} "
+                f"song{'s' if len(rows) != 1 else ''} — pick a valid slot."
             )
-        cur.execute("DELETE FROM songs WHERE id = ?", (row[0],))
+        picked = [rows[i - 1] for i in valid]
+        cur.executemany("DELETE FROM songs WHERE id = ?",
+                        [(r[0],) for r in picked])
         conn.commit()
-    return row[1], (row[2] if row[3] else None)
+    return valid, [r[1] for r in picked], [r[2] for r in picked if r[3]]
+
+
+def remove_song_range(user_id: int, playlist: str, start: int, end: int
+                      ) -> tuple[list[str], list[str]]:
+    """Remove songs start..end (1-based, inclusive). Returns (removed titles,
+    stored-file sources whose disk files the caller must delete)."""
+    with _lock:
+        conn = _db()
+        cur = conn.cursor()
+        pid = _playlist_id(cur, user_id, playlist)
+        rows = cur.execute(
+            "SELECT id, title, source, stored_file FROM songs "
+            "WHERE playlist_id = ? ORDER BY position", (pid,)
+        ).fetchall()
+        _check_slots(cur, playlist, len(rows), start, end)
+        picked = rows[start - 1:end]
+        cur.executemany("DELETE FROM songs WHERE id = ?",
+                        [(r[0],) for r in picked])
+        conn.commit()
+    return [r[1] for r in picked], [r[2] for r in picked if r[3]]
 
 
 # -- stored audio files -------------------------------------------------------

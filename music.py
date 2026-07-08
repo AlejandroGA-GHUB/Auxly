@@ -841,21 +841,40 @@ class Music(commands.Cog):
         player.queue.extend(shuffled)
         await ctx.send(f"🔀 Shuffled **{len(shuffled)}** queued tracks.")
 
-    @commands.hybrid_command(help="Remove queue slot N (1 = next up). The playing song "
+    @commands.hybrid_command(help="Remove queue slots by number (1 = next up) — "
+                           "a!remove 3 or a!remove 2 5 9. The playing song "
                            "can't be removed — skip it instead.")
-    async def remove(self, ctx: commands.Context, index: int):
+    async def remove(self, ctx: commands.Context, *, slots: str):
         if not await self.ensure_voice(ctx):
             return
         player = self.players.get(ctx.guild.id)
         if player is None or not player.queue:
             await ctx.send("The queue is empty.")
             return
-        if not 1 <= index <= len(player.queue):
-            await ctx.send(f"Pick a slot between 1 and {len(player.queue)}.")
+        tokens = slots.split()
+        if not tokens or not all(t.isdigit() for t in tokens):
+            await ctx.send("Use it like `a!remove 3` or `a!remove 2 5 9`.")
             return
-        removed = player.queue[index - 1]
-        del player.queue[index - 1]
-        await ctx.send(f"🗑️ Removed **{removed.title}** (slot {index}).")
+        qlen = len(player.queue)
+        indexes = sorted({int(t) for t in tokens})
+        valid = [i for i in indexes if 1 <= i <= qlen]
+        if not valid:
+            await ctx.send(f"Pick slots between 1 and {qlen}.")
+            return
+        removed = [player.queue[i - 1] for i in valid]
+        for i in reversed(valid):
+            del player.queue[i - 1]
+        if len(removed) == 1:
+            msg = f"🗑️ Removed **{removed[0].title}** (slot {valid[0]})."
+        else:
+            msg = (f"🗑️ Removed **{len(removed)}** tracks (slots "
+                   f"{', '.join(str(i) for i in valid)}). "
+                   f"{len(player.queue)} left in the queue.")
+        skipped = len(indexes) - len(valid)
+        if skipped:
+            msg += (f" Skipped {skipped} number{'s' if skipped != 1 else ''} "
+                    f"outside 1–{qlen}.")
+        await ctx.send(msg)
 
     @commands.hybrid_command(name="removerange",
                       brief="Remove queue slots X through Y.",

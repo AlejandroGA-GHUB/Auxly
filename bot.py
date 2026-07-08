@@ -93,7 +93,8 @@ async def help_command(ctx: commands.Context):
         f"`{PREFIX}queue` — Show the queue.",
         f"`{PREFIX}shuffle` — Shuffle the queue (playing song keeps playing).",
         f"`{PREFIX}move <n>` — Move queue slot n to the front (plays next).",
-        f"`{PREFIX}remove <n>` — Remove queue slot n (1 = next up).",
+        f"`{PREFIX}remove <n> [n ...]` — Remove queue slots by number "
+        f"(1 = next up); `{PREFIX}remove 2 5 9` removes all three.",
         f"`{PREFIX}removerange <x> <y>` — Remove queue slots x through y "
         f"(`{PREFIX}removerange 2 5` or `{PREFIX}removerange 2-5` both work).",
         f"`{PREFIX}clear` — Empty the queue (keeps the playing song).",
