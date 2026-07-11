@@ -49,6 +49,7 @@ class Track:
     source: str
     duration: int | None = None  # seconds, if known
     requester: str = ""
+    requester_id: int = 0  # Discord user id; majority skip exempts the requester
     webpage_url: str | None = None
     direct: bool = False  # audio file URL: FFmpeg plays it as-is, no yt-dlp
 

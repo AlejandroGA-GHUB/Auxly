@@ -99,6 +99,10 @@ CREATE TABLE IF NOT EXISTS revoked_perms (
     action  TEXT NOT NULL,
     PRIMARY KEY (user_id, action)
 );
+CREATE TABLE IF NOT EXISTS guild_settings (
+    guild_id      INTEGER PRIMARY KEY,
+    majority_skip INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -668,3 +672,31 @@ def list_revoked() -> list[tuple[int, str]]:
             "SELECT user_id, action FROM revoked_perms ORDER BY action"
         ).fetchall()
     return [(r[0], r[1]) for r in rows]
+
+
+def get_majority_skip(guild_id: int) -> bool:
+    """Whether skips in this guild need a majority vote (default off)."""
+    with _lock:
+        row = _db().execute(
+            "SELECT majority_skip FROM guild_settings WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+    return bool(row and row[0])
+
+
+def set_majority_skip(guild_id: int, on: bool) -> bool:
+    """Turn majority skip on/off for a guild. Returns True if it changed."""
+    with _lock:
+        conn = _db()
+        before = conn.execute(
+            "SELECT majority_skip FROM guild_settings WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO guild_settings (guild_id, majority_skip) "
+            "VALUES (?, ?) ON CONFLICT(guild_id) "
+            "DO UPDATE SET majority_skip = excluded.majority_skip",
+            (guild_id, int(on)),
+        )
+        conn.commit()
+    return bool(before and before[0]) != on

@@ -87,7 +87,8 @@ async def help_command(ctx: commands.Context):
         f"`{PREFIX}join` — Bring the bot into your voice channel without "
         "playing anything.",
         f"`{PREFIX}pause` / `{PREFIX}resume` — Pause / resume the current song.",
-        f"`{PREFIX}skip` — Skip the current song (cancels any loop).",
+        f"`{PREFIX}skip` — Skip the current song (cancels any loop). If the "
+        "owner enabled majority skip, this casts your skip vote instead.",
         f"`{PREFIX}loop <n>` — Repeat the current song n more times; the queue "
         f"waits until the loops finish. `{PREFIX}loop 0` cancels.",
         f"`{PREFIX}queue` — Show the queue.",
@@ -182,6 +183,9 @@ async def devhelp(ctx: commands.Context):
         "user from pausing/resuming (commands and buttons), or re-allow it.",
         f"`{PREFIX}revokeclear @user` / `{PREFIX}grantclear @user` — Block a "
         "user from clearing the queue, or re-allow it.",
+        f"`{PREFIX}majorityskip on|off` — Require a majority vote to skip "
+        "in this server (requester and owner still skip instantly; no "
+        "argument shows the setting).",
         f"`{PREFIX}grantfiles @user` — Let a user store audio files with "
         f"`{PREFIX}playlist addfile` (25 MB/file, 100 files per profile, "
         "saved in `audio_files/`).",
