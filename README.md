@@ -133,7 +133,6 @@ first launch (Discord-side propagation, one time only).
 | `a!clear` | Empty the queue (keeps the playing song) |
 | `a!nowplaying` | Current song + elapsed time |
 | `a!history` | Last 10 songs played (resets on restart) |
-| `a!stop` | Stop and leave the voice channel |
 | `a!help` | List all commands |
 | `a!profilehelp` | Profile & playlist commands (below) |
 
@@ -217,7 +216,10 @@ Discord, `a!devhelp` lists them all.
 |---|---|
 | `a!devhelp` | List all owner commands |
 | `a!shutdown` | Cleanly shut the bot down (the way to stop a windowless launch) |
+| `a!stop` | Stop playback and leave the voice channel |
 | `a!profile delete <name>` | Delete any user's profile and all its playlists (frees their stored files too) |
+| `a!revokepause @user` / `a!grantpause @user` | Block a user from pausing/resuming (commands and buttons), or re-allow it |
+| `a!revokeclear @user` / `a!grantclear @user` | Block a user from clearing the queue, or re-allow it |
 | `a!grantfiles @user` | Let a user store audio files with `a!playlist addfile` |
 | `a!revokefiles @user` | Stop a user's new uploads (their existing files stay playable) |
 | `a!fileperms` | List everyone with file storage permission |

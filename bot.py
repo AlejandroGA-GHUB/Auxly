@@ -103,7 +103,6 @@ async def help_command(ctx: commands.Context):
         f"`{PREFIX}history` — Show the last 10 songs played.",
         f"`{PREFIX}save <playlist>` — Save the currently playing song to one "
         f"of your playlists (see `{PREFIX}profilehelp`).",
-        f"`{PREFIX}stop` — Stop everything and leave the voice channel.",
         f"`{PREFIX}profilehelp` — Profiles & saved playlists: build song "
         "collections you can queue anytime, on any server.",
     ]
@@ -176,8 +175,13 @@ async def _startup_version_check():
 async def devhelp(ctx: commands.Context):
     lines = [
         f"`{PREFIX}shutdown` — Cleanly shut the bot down.",
+        f"`{PREFIX}stop` — Stop playback and leave the voice channel.",
         f"`{PREFIX}profile delete <name>` — Delete any profile and all its "
         "playlists (frees its stored files too).",
+        f"`{PREFIX}revokepause @user` / `{PREFIX}grantpause @user` — Block a "
+        "user from pausing/resuming (commands and buttons), or re-allow it.",
+        f"`{PREFIX}revokeclear @user` / `{PREFIX}grantclear @user` — Block a "
+        "user from clearing the queue, or re-allow it.",
         f"`{PREFIX}grantfiles @user` — Let a user store audio files with "
         f"`{PREFIX}playlist addfile` (25 MB/file, 100 files per profile, "
         "saved in `audio_files/`).",
@@ -247,6 +251,15 @@ async def status(ctx: commands.Context):
         f"👤 {len(profiles)} profile{'s' if len(profiles) != 1 else ''} · "
         f"{len(perms)} user{'s' if len(perms) != 1 else ''} with file storage"
     )
+    revoked = await asyncio.to_thread(storage.list_revoked)
+    if revoked:
+        by_action: dict[str, list[int]] = {}
+        for uid, action in revoked:
+            by_action.setdefault(action, []).append(uid)
+        lines.append("⛔ Revoked — " + " · ".join(
+            f"{action}: " + ", ".join(f"<@{u}>" for u in ids)
+            for action, ids in sorted(by_action.items())
+        ))
     embed = discord.Embed(
         title="📡 Auxly Status",
         description="\n".join(lines),

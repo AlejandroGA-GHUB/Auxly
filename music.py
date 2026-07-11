@@ -21,6 +21,7 @@ import discord
 from discord.ext import commands
 
 import sources
+import storage
 from sources import Track, TrackError
 
 IDLE_TIMEOUT = 60 * 60  # 1 hour with nothing playing -> disconnect
@@ -59,6 +60,23 @@ def _probe_codec_sync(url: str) -> str | None:
 
 async def probe_codec(url: str) -> str | None:
     return await asyncio.to_thread(_probe_codec_sync, url)
+
+
+# Anti-troll revocations (a!revokepause / a!revokeclear, see a!devhelp):
+# action key -> the "you've been revoked" error shown to the user.
+REVOKED_MSG = {
+    "pause": "⛔ The bot owner has revoked your pause/resume access.",
+    "clear": "⛔ The bot owner has revoked your queue-clear access.",
+}
+
+
+async def is_revoked(bot: commands.Bot, user: discord.abc.User,
+                     action: str) -> bool:
+    """True if the owner has revoked this user's access to an action.
+    The bot owner can never be revoked."""
+    if await bot.is_owner(user):
+        return False
+    return await asyncio.to_thread(storage.is_revoked, user.id, action)
 
 
 def fmt_duration(seconds: int | None) -> str:
@@ -165,6 +183,10 @@ class NowPlayingView(discord.ui.View):
                        style=discord.ButtonStyle.secondary)
     async def pause_button(self, interaction: discord.Interaction,
                            button: discord.ui.Button):
+        if await is_revoked(self.player.bot, interaction.user, "pause"):
+            await interaction.response.send_message(
+                REVOKED_MSG["pause"], ephemeral=True)
+            return
         vc = self.player.guild.voice_client
         if vc.is_paused():
             vc.resume()
@@ -706,6 +728,9 @@ class Music(commands.Cog):
     async def pause(self, ctx: commands.Context):
         if not await self.ensure_voice(ctx):
             return
+        if await is_revoked(self.bot, ctx.author, "pause"):
+            await ctx.send(REVOKED_MSG["pause"])
+            return
         vc = ctx.voice_client
         if vc.is_playing():
             vc.pause()
@@ -716,6 +741,9 @@ class Music(commands.Cog):
     @commands.hybrid_command(help="Resume a paused song.")
     async def resume(self, ctx: commands.Context):
         if not await self.ensure_voice(ctx):
+            return
+        if await is_revoked(self.bot, ctx.author, "pause"):
+            await ctx.send(REVOKED_MSG["pause"])
             return
         vc = ctx.voice_client
         if vc.is_paused():
@@ -916,6 +944,9 @@ class Music(commands.Cog):
     async def clear(self, ctx: commands.Context):
         if not await self.ensure_voice(ctx):
             return
+        if await is_revoked(self.bot, ctx.author, "clear"):
+            await ctx.send(REVOKED_MSG["clear"])
+            return
         player = self.players.get(ctx.guild.id)
         if player is None or not player.queue:
             await ctx.send("The queue is already empty.")
@@ -963,7 +994,9 @@ class Music(commands.Cog):
         embed.set_footer(text="Newest first. History resets when the bot restarts.")
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(help="Stop everything and leave the voice channel.")
+    @commands.command(help="(Owner only) Stop everything and leave the "
+                           "voice channel.")
+    @commands.is_owner()
     async def stop(self, ctx: commands.Context):
         if not await self.ensure_voice(ctx):
             return
@@ -973,6 +1006,59 @@ class Music(commands.Cog):
         elif ctx.voice_client:
             await ctx.voice_client.disconnect(force=True)
         await ctx.send("👋 Stopped and left the channel.")
+
+    # -- pause/clear revocations (owner-only, prefix-only; see a!devhelp) ----
+
+    @commands.command(name="revokepause",
+                      help="(Owner only) Block a user from pausing/resuming "
+                           "(commands and buttons).")
+    @commands.is_owner()
+    async def revokepause(self, ctx: commands.Context, user: discord.User):
+        changed = await asyncio.to_thread(
+            storage.set_revoked, user.id, "pause", True)
+        if changed:
+            await ctx.send(f"⛔ {user.mention} can no longer pause/resume.")
+        else:
+            await ctx.send(f"{user.mention} is already revoked from "
+                           "pause/resume.")
+
+    @commands.command(name="grantpause",
+                      help="(Owner only) Let a revoked user pause/resume "
+                           "again.")
+    @commands.is_owner()
+    async def grantpause(self, ctx: commands.Context, user: discord.User):
+        changed = await asyncio.to_thread(
+            storage.set_revoked, user.id, "pause", False)
+        if changed:
+            await ctx.send(f"▶️ {user.mention} can pause/resume again.")
+        else:
+            await ctx.send(f"{user.mention} wasn't revoked from pause/resume.")
+
+    @commands.command(name="revokeclear",
+                      help="(Owner only) Block a user from clearing the "
+                           "queue.")
+    @commands.is_owner()
+    async def revokeclear(self, ctx: commands.Context, user: discord.User):
+        changed = await asyncio.to_thread(
+            storage.set_revoked, user.id, "clear", True)
+        if changed:
+            await ctx.send(f"⛔ {user.mention} can no longer clear the queue.")
+        else:
+            await ctx.send(f"{user.mention} is already revoked from "
+                           "queue-clearing.")
+
+    @commands.command(name="grantclear",
+                      help="(Owner only) Let a revoked user clear the queue "
+                           "again.")
+    @commands.is_owner()
+    async def grantclear(self, ctx: commands.Context, user: discord.User):
+        changed = await asyncio.to_thread(
+            storage.set_revoked, user.id, "clear", False)
+        if changed:
+            await ctx.send(f"🧹 {user.mention} can clear the queue again.")
+        else:
+            await ctx.send(f"{user.mention} wasn't revoked from "
+                           "queue-clearing.")
 
 
 async def setup(bot: commands.Bot):
