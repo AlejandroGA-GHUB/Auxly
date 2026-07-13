@@ -78,7 +78,8 @@ async def help_command(ctx: commands.Context):
         "✨ Every command also works as a **/slash command** — same names, "
         "same behavior.\n",
         f"`{PREFIX}play <link or search>` — Play a song, or queue it if one is "
-        "already playing. Handles YouTube links, Spotify links, playlists, and "
+        "already playing. Handles YouTube links, Spotify links, SoundCloud "
+        "tracks & sets, X (Twitter) video posts, playlists, and "
         "attached audio files (mp3, wav, flac, …) — just attach the file to "
         f"the `{PREFIX}play` message. (Attached files work with `{PREFIX}play` "
         "only, not `/play`.)",

@@ -142,20 +142,20 @@ class NowPlayingView(discord.ui.View):
             await message.edit(view=self)
             if self.is_finished():
                 # Retired while our edit was in flight: our enabled snapshot
-                # may have landed after the grey-out — re-apply disabled.
-                await message.edit(view=self)
+                # may have landed after the removal — take the buttons off.
+                await message.edit(view=None)
         except discord.HTTPException:
             pass
 
     async def _edit(self, interaction: discord.Interaction):
         """Respond to a click by re-rendering the view — and if the song
         ended while that edit was in flight (retire_controls races with
-        interaction responses), re-apply the greyed-out state so a finished
-        song can never be left with live-looking buttons."""
+        interaction responses), remove the buttons again so a finished
+        song can never be left with live-looking controls."""
         await interaction.response.edit_message(view=self)
         if self.is_finished():
             try:
-                await interaction.edit_original_response(view=self)
+                await interaction.edit_original_response(view=None)
             except discord.HTTPException:
                 pass
 
@@ -166,7 +166,7 @@ class NowPlayingView(discord.ui.View):
                 or vc is None or not vc.is_connected()):
             self.disable_all()
             try:
-                await interaction.response.edit_message(view=self)
+                await interaction.response.edit_message(view=None)
             except discord.HTTPException:
                 pass
             return False
@@ -212,7 +212,7 @@ class NowPlayingView(discord.ui.View):
         skipped, message = await self.player.try_skip(interaction.user)
         if skipped:
             self.disable_all()
-            await interaction.response.edit_message(view=self)
+            await interaction.response.edit_message(view=None)
             return
         # Vote registered but short of a majority: post the tally publicly
         # so the rest of the channel knows a vote is underway.
@@ -556,16 +556,16 @@ class GuildPlayer:
             self.np_view.schedule_sync(self.np_message)
 
     async def retire_controls(self):
-        """Grey out the previous Now Playing buttons (only the newest
-        message keeps live controls)."""
+        """Remove the previous Now Playing buttons entirely (only the newest
+        message keeps live controls; old messages keep just their embed)."""
         view, msg = self.np_view, self.np_message
         self.np_view = self.np_message = None
         if view is None:
             return
-        view.disable_all()
+        view.disable_all()  # stop() the view so late clicks are refused
         if msg:
             try:
-                await msg.edit(view=view)
+                await msg.edit(view=None)
             except discord.HTTPException:
                 pass
 
@@ -1134,11 +1134,11 @@ class Music(commands.Cog):
             await ctx.send(f"Majority skip is already **{setting}** here.")
         elif on:
             await ctx.send(
-                "🗳️ Majority skip is **on**: skipping now needs a majority "
+                "Majority skip is **on**: skipping now needs a majority "
                 "of the listeners in the voice channel (the song's requester "
                 "and the bot owner still skip instantly).")
         else:
-            await ctx.send("🗳️ Majority skip is **off**: anyone can skip "
+            await ctx.send("Majority skip is **off**: anyone can skip "
                            "again.")
 
 

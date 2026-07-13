@@ -37,6 +37,7 @@ SPOTIFY_URL_RE = re.compile(
     r"open\.spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist)/([A-Za-z0-9]+)"
 )
 YOUTUBE_PLAYLIST_RE = re.compile(r"[?&]list=([A-Za-z0-9_-]+)")
+SOUNDCLOUD_SET_RE = re.compile(r"soundcloud\.com/[^/]+/sets/", re.IGNORECASE)
 URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 
@@ -52,6 +53,7 @@ class Track:
     requester_id: int = 0  # Discord user id; majority skip exempts the requester
     webpage_url: str | None = None
     direct: bool = False  # audio file URL: FFmpeg plays it as-is, no yt-dlp
+    title_is_guess: bool = False  # slug placeholder; real title fills in at play time
 
 
 class TrackError(Exception):
@@ -132,8 +134,9 @@ async def get_stream_url(track: Track) -> str:
     # Fill in metadata we may not have had (e.g. Spotify-sourced tracks)
     track.duration = track.duration or data.get("duration")
     track.webpage_url = data.get("webpage_url", track.webpage_url)
-    if not track.title or track.source == track.title:
+    if not track.title or track.source == track.title or track.title_is_guess:
         track.title = data.get("title", track.title)
+        track.title_is_guess = False
     url = data.get("url")
     if not url:
         raise TrackError(f"No playable audio stream for: {track.title}")
@@ -153,6 +156,9 @@ async def resolve(query: str, requester: str) -> list[Track]:
 
     if URL_RE.match(query) and YOUTUBE_PLAYLIST_RE.search(query):
         return await _resolve_youtube_playlist(query, requester)
+
+    if URL_RE.match(query) and SOUNDCLOUD_SET_RE.search(query):
+        return await _resolve_soundcloud_set(query, requester)
 
     # Single URL or plain search terms.
     data = await _extract(query, noplaylist=True)
@@ -185,6 +191,40 @@ async def _resolve_youtube_playlist(url: str, requester: str) -> list[Track]:
             source=e.get("url") or f"https://www.youtube.com/watch?v={e['id']}",
             duration=e.get("duration"),
             requester=requester,
+        )
+        for e in entries
+    ]
+
+
+def _slug_title(url: str) -> str:
+    """Readable placeholder from a track permalink's slug ("nymano-mirage" ->
+    "nymano mirage") — flat SoundCloud set entries carry no titles. Long sets
+    only embed permalinks for the first few tracks; the rest are numeric
+    api-v2 stubs, which get a generic placeholder instead."""
+    slug = urllib.parse.unquote(
+        url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    ).strip()
+    if not slug or slug.isdigit():
+        return "SoundCloud track"
+    return slug.replace("-", " ")
+
+
+async def _resolve_soundcloud_set(url: str, requester: str) -> list[Track]:
+    # Flat extraction like YouTube playlists: fast, streams resolve at play
+    # time, and (unlike full extraction) one geo-blocked track can't fail
+    # the whole set. Flat entries carry no titles, so the queue shows a
+    # placeholder until each song starts.
+    data = await _extract(url, extract_flat="in_playlist")
+    entries = [e for e in data.get("entries", []) if e and e.get("url")]
+    if not entries:
+        raise TrackError("That SoundCloud set has no playable tracks.")
+    return [
+        Track(
+            title=e.get("title") or _slug_title(e["url"]),
+            source=e["url"],
+            duration=e.get("duration"),
+            requester=requester,
+            title_is_guess=not e.get("title"),
         )
         for e in entries
     ]
