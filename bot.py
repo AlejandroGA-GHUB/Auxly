@@ -78,7 +78,8 @@ async def help_command(ctx: commands.Context):
         "✨ Every command also works as a **/slash command** — same names, "
         "same behavior.\n",
         f"`{PREFIX}play <link or search>` — Play a song, or queue it if one is "
-        "already playing. Handles YouTube links, Spotify links, playlists, and "
+        "already playing. Handles YouTube links, Spotify links, SoundCloud "
+        "tracks & sets, X (Twitter) video posts, playlists, and "
         "attached audio files (mp3, wav, flac, …) — just attach the file to "
         f"the `{PREFIX}play` message. (Attached files work with `{PREFIX}play` "
         "only, not `/play`.)",
@@ -87,7 +88,8 @@ async def help_command(ctx: commands.Context):
         f"`{PREFIX}join` — Bring the bot into your voice channel without "
         "playing anything.",
         f"`{PREFIX}pause` / `{PREFIX}resume` — Pause / resume the current song.",
-        f"`{PREFIX}skip` — Skip the current song (cancels any loop).",
+        f"`{PREFIX}skip` — Skip the current song (cancels any loop). If the "
+        "owner enabled majority skip, this casts your skip vote instead.",
         f"`{PREFIX}loop <n>` — Repeat the current song n more times; the queue "
         f"waits until the loops finish. `{PREFIX}loop 0` cancels.",
         f"`{PREFIX}queue` — Show the queue.",
@@ -103,7 +105,6 @@ async def help_command(ctx: commands.Context):
         f"`{PREFIX}history` — Show the last 10 songs played.",
         f"`{PREFIX}save <playlist>` — Save the currently playing song to one "
         f"of your playlists (see `{PREFIX}profilehelp`).",
-        f"`{PREFIX}stop` — Stop everything and leave the voice channel.",
         f"`{PREFIX}profilehelp` — Profiles & saved playlists: build song "
         "collections you can queue anytime, on any server.",
     ]
@@ -176,8 +177,16 @@ async def _startup_version_check():
 async def devhelp(ctx: commands.Context):
     lines = [
         f"`{PREFIX}shutdown` — Cleanly shut the bot down.",
+        f"`{PREFIX}stop` — Stop playback and leave the voice channel.",
         f"`{PREFIX}profile delete <name>` — Delete any profile and all its "
         "playlists (frees its stored files too).",
+        f"`{PREFIX}revokepause @user` / `{PREFIX}grantpause @user` — Block a "
+        "user from pausing/resuming (commands and buttons), or re-allow it.",
+        f"`{PREFIX}revokeclear @user` / `{PREFIX}grantclear @user` — Block a "
+        "user from clearing the queue, or re-allow it.",
+        f"`{PREFIX}majorityskip on|off` — Require a majority vote to skip "
+        "in this server (requester and owner still skip instantly; no "
+        "argument shows the setting).",
         f"`{PREFIX}grantfiles @user` — Let a user store audio files with "
         f"`{PREFIX}playlist addfile` (25 MB/file, 100 files per profile, "
         "saved in `audio_files/`).",
@@ -247,6 +256,15 @@ async def status(ctx: commands.Context):
         f"👤 {len(profiles)} profile{'s' if len(profiles) != 1 else ''} · "
         f"{len(perms)} user{'s' if len(perms) != 1 else ''} with file storage"
     )
+    revoked = await asyncio.to_thread(storage.list_revoked)
+    if revoked:
+        by_action: dict[str, list[int]] = {}
+        for uid, action in revoked:
+            by_action.setdefault(action, []).append(uid)
+        lines.append("⛔ Revoked — " + " · ".join(
+            f"{action}: " + ", ".join(f"<@{u}>" for u in ids)
+            for action, ids in sorted(by_action.items())
+        ))
     embed = discord.Embed(
         title="📡 Auxly Status",
         description="\n".join(lines),

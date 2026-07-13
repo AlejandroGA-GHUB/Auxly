@@ -513,7 +513,7 @@ class Profiles(commands.Cog):
         player.enqueue([
             Track(title=title, source=_track_source(source, stored),
                   duration=duration, requester=ctx.author.display_name,
-                  direct=direct)
+                  requester_id=ctx.author.id, direct=direct)
             for title, source, duration, direct, stored in songs
         ])
         await ctx.send(
@@ -592,7 +592,7 @@ class Profiles(commands.Cog):
         player.enqueue([
             Track(title=title, source=_track_source(source, stored),
                   duration=duration, requester=ctx.author.display_name,
-                  direct=direct)
+                  requester_id=ctx.author.id, direct=direct)
             for title, source, duration, direct, stored in picked
         ])
         msg = (

@@ -21,6 +21,7 @@ import discord
 from discord.ext import commands
 
 import sources
+import storage
 from sources import Track, TrackError
 
 IDLE_TIMEOUT = 60 * 60  # 1 hour with nothing playing -> disconnect
@@ -59,6 +60,23 @@ def _probe_codec_sync(url: str) -> str | None:
 
 async def probe_codec(url: str) -> str | None:
     return await asyncio.to_thread(_probe_codec_sync, url)
+
+
+# Anti-troll revocations (a!revokepause / a!revokeclear, see a!devhelp):
+# action key -> the "you've been revoked" error shown to the user.
+REVOKED_MSG = {
+    "pause": "⛔ The bot owner has revoked your pause/resume access.",
+    "clear": "⛔ The bot owner has revoked your queue-clear access.",
+}
+
+
+async def is_revoked(bot: commands.Bot, user: discord.abc.User,
+                     action: str) -> bool:
+    """True if the owner has revoked this user's access to an action.
+    The bot owner can never be revoked."""
+    if await bot.is_owner(user):
+        return False
+    return await asyncio.to_thread(storage.is_revoked, user.id, action)
 
 
 def fmt_duration(seconds: int | None) -> str:
@@ -124,20 +142,20 @@ class NowPlayingView(discord.ui.View):
             await message.edit(view=self)
             if self.is_finished():
                 # Retired while our edit was in flight: our enabled snapshot
-                # may have landed after the grey-out — re-apply disabled.
-                await message.edit(view=self)
+                # may have landed after the removal — take the buttons off.
+                await message.edit(view=None)
         except discord.HTTPException:
             pass
 
     async def _edit(self, interaction: discord.Interaction):
         """Respond to a click by re-rendering the view — and if the song
         ended while that edit was in flight (retire_controls races with
-        interaction responses), re-apply the greyed-out state so a finished
-        song can never be left with live-looking buttons."""
+        interaction responses), remove the buttons again so a finished
+        song can never be left with live-looking controls."""
         await interaction.response.edit_message(view=self)
         if self.is_finished():
             try:
-                await interaction.edit_original_response(view=self)
+                await interaction.edit_original_response(view=None)
             except discord.HTTPException:
                 pass
 
@@ -148,7 +166,7 @@ class NowPlayingView(discord.ui.View):
                 or vc is None or not vc.is_connected()):
             self.disable_all()
             try:
-                await interaction.response.edit_message(view=self)
+                await interaction.response.edit_message(view=None)
             except discord.HTTPException:
                 pass
             return False
@@ -165,6 +183,10 @@ class NowPlayingView(discord.ui.View):
                        style=discord.ButtonStyle.secondary)
     async def pause_button(self, interaction: discord.Interaction,
                            button: discord.ui.Button):
+        if await is_revoked(self.player.bot, interaction.user, "pause"):
+            await interaction.response.send_message(
+                REVOKED_MSG["pause"], ephemeral=True)
+            return
         vc = self.player.guild.voice_client
         if vc.is_paused():
             vc.resume()
@@ -187,12 +209,14 @@ class NowPlayingView(discord.ui.View):
                        style=discord.ButtonStyle.secondary)
     async def skip_button(self, interaction: discord.Interaction,
                           button: discord.ui.Button):
-        player = self.player
-        player.loops_left = 0  # skip cancels a!loop, same as the command
-        player.current = None
-        player.guild.voice_client.stop()
-        self.disable_all()
-        await interaction.response.edit_message(view=self)
+        skipped, message = await self.player.try_skip(interaction.user)
+        if skipped:
+            self.disable_all()
+            await interaction.response.edit_message(view=None)
+            return
+        # Vote registered but short of a majority: post the tally publicly
+        # so the rest of the channel knows a vote is underway.
+        await interaction.response.send_message(message)
 
     @discord.ui.button(label="Cancel Loop", emoji="✖️",
                        style=discord.ButtonStyle.danger)
@@ -296,6 +320,7 @@ class GuildPlayer:
         self.np_view: NowPlayingView | None = None
         self.empty_task: asyncio.Task | None = None  # empty-channel countdown
         self.auto_paused = False  # paused by us (empty channel), not a user
+        self.skip_votes: set[int] = set()  # majority skip: voter user ids
         # (track, stream_url, codec) of the current song, so loop replays
         # skip the yt-dlp extraction + ffprobe (no gap, no CPU churn).
         self._stream_cache: tuple[Track, str, str | None] | None = None
@@ -310,6 +335,45 @@ class GuildPlayer:
     def enqueue_front(self, tracks: list[Track]):
         self.queue.extendleft(reversed(tracks))  # keep the tracks' order
         self.queue_updated.set()
+
+    # -- skipping (majority-skip aware) --------------------------------------
+
+    def _do_skip(self):
+        self.loops_left = 0  # skip cancels a!loop
+        self.current = None
+        vc = self.guild.voice_client
+        if vc:
+            vc.stop()
+
+    async def try_skip(self, user: discord.Member) -> tuple[bool, str]:
+        """Skip, or register a skip vote when majority skip is on for this
+        guild. The bot owner and the song's requester always skip instantly.
+        Returns (skipped, message for the user)."""
+        track = self.current
+        if (not await asyncio.to_thread(storage.get_majority_skip,
+                                        self.guild.id)
+                or await self.bot.is_owner(user)
+                or (track is not None and track.requester_id == user.id)):
+            self._do_skip()
+            return True, "⏭️ Skipped."
+        # Majority = floor(n/2) + 1 of the humans in the channel, not
+        # counting whoever queued the song. Votes from people who left the
+        # channel (or from the previous song) don't count.
+        vc = self.guild.voice_client
+        eligible = {m.id for m in vc.channel.members
+                    if not m.bot
+                    and (track is None or m.id != track.requester_id)}
+        self.skip_votes &= eligible
+        already_voted = user.id in self.skip_votes
+        self.skip_votes.add(user.id)
+        needed = len(eligible) // 2 + 1
+        if len(self.skip_votes) >= needed:
+            self._do_skip()
+            return True, "⏭️ Skip vote passed — skipped."
+        if already_voted:
+            return False, (f"You already voted — skip votes: "
+                           f"**{len(self.skip_votes)}/{needed}**.")
+        return False, f"⏭️ Skip vote: **{len(self.skip_votes)}/{needed}**."
 
     # -- empty-channel handling ---------------------------------------------
 
@@ -437,6 +501,7 @@ class GuildPlayer:
             self.started_at = time.monotonic()
             vc.play(source, after=after)
             if not replay:
+                self.skip_votes.clear()  # votes belong to the previous song
                 Music.histories.setdefault(self.guild.id, deque(maxlen=10)).append(track)
                 await self.post_controls(
                     content=f"🎶 Now playing: **{track.title}** "
@@ -491,16 +556,16 @@ class GuildPlayer:
             self.np_view.schedule_sync(self.np_message)
 
     async def retire_controls(self):
-        """Grey out the previous Now Playing buttons (only the newest
-        message keeps live controls)."""
+        """Remove the previous Now Playing buttons entirely (only the newest
+        message keeps live controls; old messages keep just their embed)."""
         view, msg = self.np_view, self.np_message
         self.np_view = self.np_message = None
         if view is None:
             return
-        view.disable_all()
+        view.disable_all()  # stop() the view so late clicks are refused
         if msg:
             try:
-                await msg.edit(view=view)
+                await msg.edit(view=None)
             except discord.HTTPException:
                 pass
 
@@ -638,6 +703,7 @@ class Music(commands.Cog):
                         return
         for t in tracks:
             t.requester = ctx.author.display_name
+            t.requester_id = ctx.author.id
         busy = player.current is not None or player.queue
         if front:
             player.enqueue_front(tracks)
@@ -706,6 +772,9 @@ class Music(commands.Cog):
     async def pause(self, ctx: commands.Context):
         if not await self.ensure_voice(ctx):
             return
+        if await is_revoked(self.bot, ctx.author, "pause"):
+            await ctx.send(REVOKED_MSG["pause"])
+            return
         vc = ctx.voice_client
         if vc.is_playing():
             vc.pause()
@@ -717,6 +786,9 @@ class Music(commands.Cog):
     async def resume(self, ctx: commands.Context):
         if not await self.ensure_voice(ctx):
             return
+        if await is_revoked(self.bot, ctx.author, "pause"):
+            await ctx.send(REVOKED_MSG["pause"])
+            return
         vc = ctx.voice_client
         if vc.is_paused():
             vc.resume()
@@ -724,7 +796,9 @@ class Music(commands.Cog):
         else:
             await ctx.send("Nothing is paused.")
 
-    @commands.hybrid_command(help="Skip the current song (also cancels an active loop).")
+    @commands.hybrid_command(help="Skip the current song (also cancels an "
+                             "active loop). If the owner enabled majority "
+                             "skip, this casts your skip vote instead.")
     async def skip(self, ctx: commands.Context):
         if not await self.ensure_voice(ctx):
             return
@@ -733,10 +807,8 @@ class Music(commands.Cog):
         if player is None or (not vc.is_playing() and not vc.is_paused()):
             await ctx.send("Nothing to skip.")
             return
-        player.loops_left = 0  # skip cancels a!loop
-        player.current = None
-        vc.stop()
-        await ctx.send("⏭️ Skipped.")
+        _, message = await player.try_skip(ctx.author)
+        await ctx.send(message)
 
     @commands.hybrid_command(brief="Repeat the current song N more times.",
                            help="Repeat the current song N more times. The queue waits "
@@ -916,6 +988,9 @@ class Music(commands.Cog):
     async def clear(self, ctx: commands.Context):
         if not await self.ensure_voice(ctx):
             return
+        if await is_revoked(self.bot, ctx.author, "clear"):
+            await ctx.send(REVOKED_MSG["clear"])
+            return
         player = self.players.get(ctx.guild.id)
         if player is None or not player.queue:
             await ctx.send("The queue is already empty.")
@@ -963,7 +1038,9 @@ class Music(commands.Cog):
         embed.set_footer(text="Newest first. History resets when the bot restarts.")
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(help="Stop everything and leave the voice channel.")
+    @commands.command(help="(Owner only) Stop everything and leave the "
+                           "voice channel.")
+    @commands.is_owner()
     async def stop(self, ctx: commands.Context):
         if not await self.ensure_voice(ctx):
             return
@@ -973,6 +1050,96 @@ class Music(commands.Cog):
         elif ctx.voice_client:
             await ctx.voice_client.disconnect(force=True)
         await ctx.send("👋 Stopped and left the channel.")
+
+    # -- pause/clear revocations (owner-only, prefix-only; see a!devhelp) ----
+
+    @commands.command(name="revokepause",
+                      help="(Owner only) Block a user from pausing/resuming "
+                           "(commands and buttons).")
+    @commands.is_owner()
+    async def revokepause(self, ctx: commands.Context, user: discord.User):
+        changed = await asyncio.to_thread(
+            storage.set_revoked, user.id, "pause", True)
+        if changed:
+            await ctx.send(f"⛔ {user.mention} can no longer pause/resume.")
+        else:
+            await ctx.send(f"{user.mention} is already revoked from "
+                           "pause/resume.")
+
+    @commands.command(name="grantpause",
+                      help="(Owner only) Let a revoked user pause/resume "
+                           "again.")
+    @commands.is_owner()
+    async def grantpause(self, ctx: commands.Context, user: discord.User):
+        changed = await asyncio.to_thread(
+            storage.set_revoked, user.id, "pause", False)
+        if changed:
+            await ctx.send(f"▶️ {user.mention} can pause/resume again.")
+        else:
+            await ctx.send(f"{user.mention} wasn't revoked from pause/resume.")
+
+    @commands.command(name="revokeclear",
+                      help="(Owner only) Block a user from clearing the "
+                           "queue.")
+    @commands.is_owner()
+    async def revokeclear(self, ctx: commands.Context, user: discord.User):
+        changed = await asyncio.to_thread(
+            storage.set_revoked, user.id, "clear", True)
+        if changed:
+            await ctx.send(f"⛔ {user.mention} can no longer clear the queue.")
+        else:
+            await ctx.send(f"{user.mention} is already revoked from "
+                           "queue-clearing.")
+
+    @commands.command(name="grantclear",
+                      help="(Owner only) Let a revoked user clear the queue "
+                           "again.")
+    @commands.is_owner()
+    async def grantclear(self, ctx: commands.Context, user: discord.User):
+        changed = await asyncio.to_thread(
+            storage.set_revoked, user.id, "clear", False)
+        if changed:
+            await ctx.send(f"🧹 {user.mention} can clear the queue again.")
+        else:
+            await ctx.send(f"{user.mention} wasn't revoked from "
+                           "queue-clearing.")
+
+    @commands.command(name="majorityskip",
+                      help="(Owner only) Turn majority-vote skipping on/off "
+                           "for this server: a!majorityskip on|off (no "
+                           "argument shows the current setting).")
+    @commands.is_owner()
+    async def majorityskip(self, ctx: commands.Context,
+                           setting: str | None = None):
+        if ctx.guild is None:
+            await ctx.send("This is a per-server setting — run it in a "
+                           "server, not a DM.")
+            return
+        if setting is None:
+            on = await asyncio.to_thread(
+                storage.get_majority_skip, ctx.guild.id)
+            await ctx.send(
+                f"Majority skip is **{'on' if on else 'off'}** here — "
+                f"`a!majorityskip on` / `a!majorityskip off` to change it.")
+            return
+        setting = setting.lower()
+        if setting not in ("on", "off"):
+            await ctx.send("Usage: `a!majorityskip on` or "
+                           "`a!majorityskip off`.")
+            return
+        on = setting == "on"
+        changed = await asyncio.to_thread(
+            storage.set_majority_skip, ctx.guild.id, on)
+        if not changed:
+            await ctx.send(f"Majority skip is already **{setting}** here.")
+        elif on:
+            await ctx.send(
+                "Majority skip is **on**: skipping now needs a majority "
+                "of the listeners in the voice channel (the song's requester "
+                "and the bot owner still skip instantly).")
+        else:
+            await ctx.send("Majority skip is **off**: anyone can skip "
+                           "again.")
 
 
 async def setup(bot: commands.Bot):

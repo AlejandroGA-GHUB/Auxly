@@ -1,4 +1,6 @@
-1.1.0
+1.2.0
+
+Release Date: day/month/year
 
 This is Auxly's release version. The bot reads the first line at startup
 and compares it against the latest release on GitHub to tell you when an

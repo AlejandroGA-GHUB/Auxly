@@ -4,7 +4,8 @@ A simple Discord music bot that runs on your own machine, built around
 audio quality, ease of setup, and support for many genuinely useful commands. 
 
 It plays YouTube links, Spotify links (tracks, albums, playlists), YouTube
-playlists, plain search terms, and your own audio files.
+playlists, SoundCloud tracks and sets, X (Twitter) video posts, plain search
+terms, and your own audio files.
 
 ## One-time setup
 
@@ -118,11 +119,11 @@ first launch (Discord-side propagation, one time only).
 
 | Command | What it does |
 |---|---|
-| `a!play <link or search>` | Play a song, or queue it if one's already playing. YouTube/Spotify links, playlists, search terms, or an **attached audio file** (mp3, wav, flac, ogg, m4a…). |
+| `a!play <link or search>` | Play a song, or queue it if one's already playing. YouTube/Spotify/SoundCloud links, X (Twitter) video posts, playlists, search terms, or an **attached audio file** (mp3, wav, flac, ogg, m4a…). |
 | `a!playnext <link or search>` | Like play, but jumps the queue (plays right after the current song) |
 | `a!join` | Bring the bot into your voice channel without playing anything |
 | `a!pause` / `a!resume` | Pause / resume |
-| `a!skip` | Skip the current song (cancels any loop) |
+| `a!skip` | Skip the current song (cancels any loop). If the owner enabled majority skip, this casts a skip vote instead — a majority of the channel's listeners (excluding whoever queued the song) must vote; the requester and owner always skip instantly. |
 | `a!loop <n>` | Repeat the current song n more times; the queue waits. `a!loop 0` cancels. |
 | `a!queue` | Show the queue (long queues get « First / ◀ Prev / Next ▶ / Last » page buttons) |
 | `a!shuffle` | Shuffle the queue (playing song keeps playing) |
@@ -133,7 +134,6 @@ first launch (Discord-side propagation, one time only).
 | `a!clear` | Empty the queue (keeps the playing song) |
 | `a!nowplaying` | Current song + elapsed time |
 | `a!history` | Last 10 songs played (resets on restart) |
-| `a!stop` | Stop and leave the voice channel |
 | `a!help` | List all commands |
 | `a!profilehelp` | Profile & playlist commands (below) |
 
@@ -142,7 +142,9 @@ Every "Now playing" message (automatic or from `a!nowplaying`) comes with
 (the label counts up, "Loop (3)"), and while a loop is active a red
 *Cancel Loop* button appears; `a!loop <n>` still works for big numbers.
 Buttons follow the same rule as commands (you must be in the bot's voice
-channel), and only the newest message keeps live buttons.
+channel), and only the newest message keeps buttons — when a song ends or
+a new one is announced, the old message's buttons disappear entirely. When
+majority skip is on, the Skip button casts a vote just like `a!skip`.
 
 The bot auto-disconnects after **1 hour** of silence. If everyone leaves the
 voice channel it pauses immediately, waits **5 minutes** for someone to come
@@ -160,7 +162,7 @@ be queued anytime, on any server the bot is in.
 | `a!profile rename <newname>` | Rename your profile |
 | `a!profiles` | List all profiles |
 | `a!playlist create <name>` | New playlist on your profile |
-| `a!playlist add <name> <song>` | Add anything `a!play` accepts: links, searches, whole YouTube/Spotify playlists (expanded into songs). Attached files can't be added this way since their Discord links expire; see `addfile`. |
+| `a!playlist add <name> <song>` | Add anything `a!play` accepts: links, searches, whole YouTube/Spotify playlists and SoundCloud sets (expanded into songs; SoundCloud hides most set titles until a song plays, so those save with placeholder names). Attached files can't be added this way since their Discord links expire; see `addfile`. |
 | `a!playlist addfile <name>` | Store attached audio files in your playlist (needs permission from the bot owner, see below; `a!` prefix only) |
 | `a!playlist view` | List your playlists |
 | `a!playlist view <profile>` | List someone's playlists |
@@ -217,7 +219,11 @@ Discord, `a!devhelp` lists them all.
 |---|---|
 | `a!devhelp` | List all owner commands |
 | `a!shutdown` | Cleanly shut the bot down (the way to stop a windowless launch) |
+| `a!stop` | Stop playback and leave the voice channel |
 | `a!profile delete <name>` | Delete any user's profile and all its playlists (frees their stored files too) |
+| `a!revokepause @user` / `a!grantpause @user` | Block a user from pausing/resuming (commands and buttons), or re-allow it |
+| `a!revokeclear @user` / `a!grantclear @user` | Block a user from clearing the queue, or re-allow it |
+| `a!majorityskip on\|off` | Require a majority vote to skip in that server (the song's requester and the owner still skip instantly; no argument shows the setting) |
 | `a!grantfiles @user` | Let a user store audio files with `a!playlist addfile` |
 | `a!revokefiles @user` | Stop a user's new uploads (their existing files stay playable) |
 | `a!fileperms` | List everyone with file storage permission |
@@ -241,6 +247,9 @@ Discord, `a!devhelp` lists them all.
   way. Single track links work even without API keys (the bot reads the
   title from Spotify's public page metadata); albums and playlists need the
   keys.
+- SoundCloud serves at most 160 kbps AAC and X 128 kbps AAC (neither offers
+  Opus), so those sources get the same single clean Opus encode as audio
+  files — the platform's own bitrate is the ceiling, not the bot.
 
 ## Troubleshooting
 
