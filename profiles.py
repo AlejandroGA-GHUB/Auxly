@@ -8,6 +8,7 @@ change its contents; deleting a whole profile is bot-owner-only.
 
 import asyncio
 import contextlib
+import io
 import os
 import random
 import re
@@ -28,11 +29,15 @@ NAME_RE = re.compile(r"[A-Za-z0-9_\-]{1,32}")
 PLAYLIST_NAME_RE = re.compile(r"[A-Za-z0-9_\- ]{1,32}")
 # Reserved so the optional shuffle flag on a!playlist playall is never
 # ambiguous.
-RESERVED_NAMES = {"y"}
+RESERVED_NAMES = {"s"}
 
 # Per-file size cap for a!playlist addfile (disk guard: worst case per profile
 # is PROFILE_FILE_CAP × this).
 MAX_FILE_MB = 25
+
+# Size cap for a!playlist import attachments — a real export of a full
+# 1,000-song profile is well under 200 KB.
+MAX_IMPORT_KB = 512
 
 
 def _norm(name: str) -> str:
@@ -83,6 +88,42 @@ def _track_source(source: str, stored: bool) -> str:
     return storage.stored_file_abs(source) if stored else source
 
 
+class _ConfirmView(discord.ui.View):
+    """Author-only [Add anyway]/[Cancel] prompt for a!playlist import when
+    the target name already exists. result: True / False / None (timeout).
+    Buttons vanish once answered (same convention as Now Playing controls)."""
+
+    def __init__(self, author_id: int):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+        self.result: bool | None = None
+
+    async def interaction_check(
+            self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only the person importing can answer this.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Add anyway", style=discord.ButtonStyle.primary)
+    async def confirm(self, interaction: discord.Interaction,
+                      button: discord.ui.Button):
+        self.result = True
+        await interaction.response.edit_message(view=None)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction,
+                     button: discord.ui.Button):
+        self.result = False
+        await interaction.response.edit_message(
+            content="Import cancelled — nothing was added.", view=None
+        )
+        self.stop()
+
+
 class Profiles(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -109,7 +150,7 @@ class Profiles(commands.Cog):
     async def _check_playlist_name(ctx: commands.Context, name: str) -> bool:
         if any(w in RESERVED_NAMES for w in name.lower().split()):
             await ctx.send(
-                "Playlist names can't contain the word **y** (it's the "
+                "Playlist names can't contain the word **s** (it's the "
                 "optional shuffle flag on `a!playlist playall`) — pick "
                 "another name."
             )
@@ -217,7 +258,7 @@ class Profiles(commands.Cog):
 
     # -- profile commands ------------------------------------------------------
 
-    @commands.hybrid_group(invoke_without_command=True,
+    @commands.hybrid_group(invoke_without_command=True, case_insensitive=True,
                            help="Profile commands — see a!profilehelp.")
     async def profile(self, ctx: commands.Context):
         name = await _db(storage.get_profile, ctx.author.id)
@@ -287,7 +328,7 @@ class Profiles(commands.Cog):
 
     # -- playlist commands -----------------------------------------------------
 
-    @commands.hybrid_group(invoke_without_command=True,
+    @commands.hybrid_group(invoke_without_command=True, case_insensitive=True,
                            help="Playlist commands — see a!profilehelp.")
     async def playlist(self, ctx: commands.Context):
         await ctx.send(HELP_HINT)
@@ -454,6 +495,160 @@ class Profiles(commands.Cog):
             msg += " " + "; ".join(notes) + "."
         await ctx.send(msg)
 
+    @playlist.command(name="export",
+                      help="Export a playlist as a text file to back up or "
+                           "share. Bring it back with a!playlist import.")
+    async def playlist_export(self, ctx: commands.Context, *, args: str):
+        await _ack(ctx)  # slash: the send below carries a file upload
+        resolved = await self._resolve_target(ctx, args.split())
+        if resolved is None:
+            return
+        user_id, profile_name, playlist = resolved
+        if playlist is None:
+            await ctx.send(
+                "Which playlist? `a!playlist export [profile] <name>`."
+            )
+            return
+        try:
+            songs = await _db(storage.get_songs, user_id, playlist)
+        except storage.StorageError as e:
+            await ctx.send(f"⚠️ {e}")
+            return
+        if not songs:
+            await ctx.send(f"**{profile_name} → {playlist}** is empty.")
+            return
+        # One song per line: title TAB source TAB duration-in-seconds.
+        # Stored files are left out — the disk file belongs to one profile.
+        lines = [
+            f"{title}\t{source}\t{duration if duration else ''}"
+            for title, source, duration, _direct, stored in songs
+            if not stored
+        ]
+        skipped = sum(1 for *_, stored in songs if stored)
+        if not lines:
+            await ctx.send(
+                f"**{profile_name} → {playlist}** only holds stored files, "
+                "which can't be exported (their audio lives on this profile)."
+            )
+            return
+        data = ("\n".join(lines) + "\n").encode("utf-8")
+        note = (f" ({skipped} stored file{'s' if skipped != 1 else ''} left "
+                "out — their audio belongs to this profile)" if skipped else "")
+        # Attaching needs the Attach Files permission; without it the upload
+        # 403s and the whole reply disappears, so say so instead of going
+        # silent (the same for any other upload failure).
+        perms = ctx.channel.permissions_for(ctx.me)
+        if not perms.attach_files:
+            await ctx.send(
+                "⚠️ I can't attach files in this channel — give me the "
+                "**Attach Files** permission and run this again."
+            )
+            return
+        try:
+            await ctx.send(
+                f"📄 **{profile_name} → {playlist}** — "
+                f"{len(lines)} song{'s' if len(lines) != 1 else ''}{note}. "
+                "Bring it into a profile with `a!playlist import <name>`.",
+                file=discord.File(io.BytesIO(data), filename=f"{playlist}.txt"),
+            )
+        except discord.HTTPException as e:
+            await ctx.send(f"⚠️ Couldn't upload the export file: {e}")
+
+    @playlist.command(name="import", with_app_command=False,
+                      help="Create a playlist from an exported text file: "
+                           "attach it to the a!playlist import <name> message "
+                           "(a! prefix only).")
+    async def playlist_import(self, ctx: commands.Context, *, name: str):
+        atts = [a for a in ctx.message.attachments
+                if a.filename.lower().endswith(".txt")]
+        if not atts:
+            await ctx.send(
+                "Attach the exported `.txt` file to the `a!playlist import "
+                "<name>` message itself. (Prefix only — slash messages can't "
+                "carry attachments.)"
+            )
+            return
+        att = atts[0]
+        if att.size > MAX_IMPORT_KB * 1024:
+            await ctx.send("⚠️ That file is too big to be a playlist export.")
+            return
+        name = _norm(name)
+        if not await self._check_playlist_name(ctx, name):
+            return
+        try:
+            raw = (await att.read()).decode("utf-8", errors="replace")
+        except discord.HTTPException:
+            await ctx.send("⚠️ Couldn't download the attachment — try again.")
+            return
+        # Exported lines are title TAB source TAB duration; a bare link per
+        # line also works, so hand-written lists import fine.
+        songs: list[tuple[str, str, int | None, bool]] = []
+        for line in raw.splitlines():
+            parts = [p.strip() for p in line.split("\t")]
+            if len(parts) >= 2 and parts[1]:
+                title, source = parts[0] or parts[1], parts[1]
+                dur = parts[2] if len(parts) >= 3 else ""
+                duration = int(dur) if dur.isdigit() else None
+            elif parts[0]:
+                title, source, duration = parts[0], parts[0], None
+            else:
+                continue  # blank line
+            songs.append((title, source, duration, False))
+        if not songs:
+            await ctx.send(
+                "⚠️ That file has no songs in it — expected one per line, "
+                "like the ones `a!playlist export` makes."
+            )
+            return
+        existing = {
+            n.lower() for n, _ in await _db(storage.list_playlists,
+                                            ctx.author.id)
+        }
+        if name.lower() in existing:
+            # Refuse-by-default so a shared file can't silently pollute a
+            # same-named playlist; the importer can still choose to merge.
+            view = _ConfirmView(ctx.author.id)
+            prompt = await ctx.send(
+                f"**{name}** already exists on your profile — add this "
+                f"file's {len(songs)} song{'s' if len(songs) != 1 else ''} "
+                "into it? (Songs it already has are skipped.)",
+                view=view,
+            )
+            await view.wait()
+            if view.result is None:
+                with contextlib.suppress(discord.HTTPException):
+                    await prompt.edit(
+                        content="Import timed out — nothing was added.",
+                        view=None,
+                    )
+                return
+            if view.result is False:
+                return  # the Cancel click already updated the prompt
+        else:
+            try:
+                await _db(storage.create_playlist, ctx.author.id, name)
+            except storage.StorageError as e:
+                await ctx.send(f"⚠️ {e}")
+                return
+        try:
+            added, dupes = await _db(storage.add_songs, ctx.author.id,
+                                     name, songs)
+        except storage.StorageError as e:
+            await ctx.send(f"⚠️ {e}")
+            return
+        capped = len(songs) - added - dupes
+        msg = (f"📥 Imported **{added}** song{'s' if added != 1 else ''} "
+               f"into **{name}**")
+        notes = []
+        if dupes:
+            notes.append(f"{dupes} already in it")
+        if capped:
+            notes.append(f"{capped} over the "
+                         f"{storage.PROFILE_SONG_CAP:,}-song cap")
+        if notes:
+            msg += " (skipped " + ", ".join(notes) + ")"
+        await ctx.send(msg + ".")
+
     @playlist.command(name="view",
                       help="View playlists. No args: your playlists. A profile: "
                            "their playlists. A playlist name: its songs.")
@@ -470,18 +665,18 @@ class Profiles(commands.Cog):
 
     @playlist.command(name="playall",
                       help="Queue a whole playlist: a!playlist playall "
-                           "[profile] <name> [y] — add y at the end to "
+                           "[profile] <name> [s] — add s at the end to "
                            "shuffle.")
     async def playlist_playall(self, ctx: commands.Context, *, args: str):
         await _ack(ctx)  # voice connect below can exceed the slash 3 s window
         tokens = args.split()
         shuffle = False
-        if tokens and tokens[-1].lower() == "y":  # optional trailing shuffle flag
+        if tokens and tokens[-1].lower() == "s":  # optional trailing shuffle flag
             shuffle = True
             tokens = tokens[:-1]
         if not tokens:
             await ctx.send(
-                "Which playlist? `a!playlist playall [profile] <name> [y]`."
+                "Which playlist? `a!playlist playall [profile] <name> [s]`."
             )
             return
         resolved = await self._resolve_target(ctx, tokens)
@@ -491,7 +686,7 @@ class Profiles(commands.Cog):
         if playlist is None:  # a bare profile name with no playlist after it
             await ctx.send(
                 f"Which of **{profile_name}**'s playlists? "
-                f"`a!playlist playall {profile_name} <name> [y]`."
+                f"`a!playlist playall {profile_name} <name> [s]`."
             )
             return
         try:
@@ -652,9 +847,8 @@ class Profiles(commands.Cog):
         await ctx.send(f"🔃 Swapped **{t1}** ↔ **{t2}** in **{name}**.")
 
     @playlist.command(name="remove",
-                      help="Remove songs by number (see a!playlist view) — "
-                           "a!playlist remove <name> 3 or "
-                           "a!playlist remove <name> 3 9 14.")
+                      help="Remove songs by their view numbers — "
+                           "a!playlist remove <name> 3, or 3 9 14 for several.")
     async def playlist_remove(self, ctx: commands.Context, *, args: str):
         usage = "a!playlist remove <name> <n> [n ...]"
         # Longest prefix that names one of your playlists (so names ending
@@ -695,9 +889,8 @@ class Profiles(commands.Cog):
         await ctx.send(msg)
 
     @playlist.command(name="removerange",
-                      help="Remove songs X through Y from your playlist — "
-                           "a!playlist removerange <name> 2 5 and "
-                           "a!playlist removerange <name> 2-5 both work.")
+                      help="Remove songs X through Y from a playlist — "
+                           "a!playlist removerange <name> 2 5 (or 2-5).")
     async def playlist_remove_range(self, ctx: commands.Context, *, args: str):
         usage = "a!playlist removerange <name> <x> <y>"
         # Same two spellings as a!removerange: trailing "2 5" or "2-5".
@@ -925,11 +1118,16 @@ class Profiles(commands.Cog):
             "`a!playlist addfile <name>` — Store attached audio files in your "
             "playlist (requires file perms from the bot owner; `a!` prefix "
             "only).",
+            "`a!playlist export [profile] <name>` — Get a playlist as a "
+            "text file you can back up or share (stored files left out).",
+            "`a!playlist import <name>` — Create a playlist from an exported "
+            "file — attach it to the message (`a!` prefix only). If the name "
+            "already exists you'll be asked before songs are added to it.",
             "`a!playlist view` — List your playlists.",
             "`a!playlist view <profile>` — List someone's playlists.",
             "`a!playlist view [profile] <name>` — Show a playlist's songs.",
-            "`a!playlist playall [profile] <name> [y]` — Queue a whole "
-            "playlist. Add `y` at the end to shuffle it in — optional, leave "
+            "`a!playlist playall [profile] <name> [s]` — Queue a whole "
+            "playlist. Add `s` at the end to shuffle it in — optional, leave "
             "it off for normal order.",
             "`a!playlist play [profile] <name> <n> <n> ...` — Queue just "
             "those numbered songs (numbers from `a!playlist view`), in the "

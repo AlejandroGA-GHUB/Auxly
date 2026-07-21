@@ -428,7 +428,7 @@ class GuildPlayer:
                     try:
                         track = await self._next_track()
                     except asyncio.TimeoutError:
-                        await self._say("💤 Idle for an hour — leaving the channel. See ya!")
+                        await self._say("💤 Idle for an hour, leaving the channel now.")
                         break
                 await self._play(track)
         except asyncio.CancelledError:
@@ -672,7 +672,20 @@ class Music(commands.Cog):
 
     async def _enqueue_request(self, ctx: commands.Context,
                                query: str | None, front: bool):
-        """Shared body of play/playnext: resolve input and queue it."""
+        """Shared body of play/playnext: resolve input and queue it.
+
+        A trailing s/S after a LINK shuffles the resolved tracks before they
+        join the queue (playlists/sets; a single track has nothing to
+        shuffle). Only recognized after a URL so search terms ending in a
+        literal "s" are never eaten.
+        """
+        shuffle = False
+        if query:
+            parts = query.split()
+            if (len(parts) == 2 and parts[1].lower() == "s"
+                    and sources.URL_RE.match(parts[0])):
+                shuffle = True
+                query = parts[0]
         attachments = [
             a for a in (ctx.message.attachments if ctx.message else [])
             if a.filename.lower().endswith(sources.AUDIO_EXTS)
@@ -696,11 +709,16 @@ class Music(commands.Cog):
         if query:
             async with self.progress(ctx):
                 try:
-                    tracks += await sources.resolve(query, ctx.author.display_name)
+                    resolved = await sources.resolve(query,
+                                                     ctx.author.display_name)
                 except TrackError as e:
                     await ctx.send(f"⚠️ {e}")
                     if not tracks:
                         return
+                else:
+                    if shuffle:
+                        random.shuffle(resolved)
+                    tracks += resolved
         for t in tracks:
             t.requester = ctx.author.display_name
             t.requester_id = ctx.author.id
@@ -710,10 +728,13 @@ class Music(commands.Cog):
         else:
             player.enqueue(tracks)
         if len(tracks) > 1:
+            note = ", shuffled" if shuffle else ""
             if front:
-                await ctx.send(f"⏫ Queued **{len(tracks)}** tracks to play next.")
+                await ctx.send(
+                    f"⏫ Queued **{len(tracks)}** tracks to play next{note}."
+                )
             else:
-                await ctx.send(f"➕ Queued **{len(tracks)}** tracks.")
+                await ctx.send(f"➕ Queued **{len(tracks)}** tracks{note}.")
         elif busy:
             if front:
                 await ctx.send(f"⏫ **{tracks[0].title}** will play next.")
@@ -729,7 +750,8 @@ class Music(commands.Cog):
     @commands.hybrid_command(brief="Play a song or add it to the queue.",
                            help="Play a song or add it to the queue. Takes a YouTube "
                            "link, Spotify link, playlist link, search terms, or "
-                           "an attached audio file (mp3, wav, flac, …).")
+                           "an attached audio file (mp3, wav, flac, …). Add s "
+                           "after a playlist link to shuffle it in.")
     async def play(self, ctx: commands.Context, *, query: str | None = None):
         await self._enqueue_request(ctx, query, front=False)
 
@@ -796,9 +818,10 @@ class Music(commands.Cog):
         else:
             await ctx.send("Nothing is paused.")
 
-    @commands.hybrid_command(help="Skip the current song (also cancels an "
-                             "active loop). If the owner enabled majority "
-                             "skip, this casts your skip vote instead.")
+    # help doubles as the slash description, which Discord caps at 100
+    # characters — one over-long line rejects the whole tree sync.
+    @commands.hybrid_command(help="Skip the current song, or cast a vote when "
+                             "majority skip is on. Cancels an active loop.")
     async def skip(self, ctx: commands.Context):
         if not await self.ensure_voice(ctx):
             return
@@ -913,9 +936,8 @@ class Music(commands.Cog):
         player.queue.extend(shuffled)
         await ctx.send(f"🔀 Shuffled **{len(shuffled)}** queued tracks.")
 
-    @commands.hybrid_command(help="Remove queue slots by number (1 = next up) — "
-                           "a!remove 3 or a!remove 2 5 9. The playing song "
-                           "can't be removed — skip it instead.")
+    @commands.hybrid_command(help="Remove queue slots by number (1 = next up) "
+                           "— a!remove 3, or several at once: a!remove 2 5 9.")
     async def remove(self, ctx: commands.Context, *, slots: str):
         if not await self.ensure_voice(ctx):
             return
