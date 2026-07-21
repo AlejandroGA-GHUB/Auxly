@@ -29,12 +29,13 @@ terms, and your own audio files.
       for `a!` commands)
    4. **OAuth2 → URL Generator**: check `bot` **and** `applications.commands`
       (the latter enables /slash commands), then permissions *View Channels*,
-      *Send Messages*, *Embed Links*, *Read Message History*, *Connect*,
-      *Speak*. Open the generated URL to invite the bot to your server.
-      (Without *View Channels* the bot can't see any channel and will
-      silently ignore everything. Already invited the bot without
-      `applications.commands`? Just open the new URL. Re-inviting updates
-      the bot in place.)
+      *Send Messages*, *Embed Links*, *Attach Files*, *Read Message History*,
+      *Connect*, *Speak*. Open the generated URL to invite the bot to your
+      server. (Without *View Channels* the bot can't see any channel and will
+      silently ignore everything; without *Attach Files* `a!playlist export`
+      can't post the playlist file. Already invited the bot without
+      `applications.commands` or *Attach Files*? Just open the new URL.
+      Re-inviting updates the bot in place.)
 
 3. **Paste the token into `.env`**, the file `setup.bat` created and opened
    for you: `DISCORD_TOKEN=your-token-here`. Save and close. That's it.
@@ -112,14 +113,15 @@ manually to keep all your data intact.
 ## Commands (prefix `a!`, and every command also works as a /slash command)
 
 Type `/play`, `/skip`, `/playlist view`, and so on, and Discord shows the
-parameters as fillable fields. The one exception: **attached audio files
+parameters as fillable fields. Prefix commands ignore case — `a!PLay` and
+`a!Playlist ADD` work fine (the slash picker already matches any case). The one exception: **attached audio files
 work with `a!play` only**, since slash commands can't carry attachments
 here. Slash commands may take up to an hour to first appear after the very
 first launch (Discord-side propagation, one time only).
 
 | Command | What it does |
 |---|---|
-| `a!play <link or search>` | Play a song, or queue it if one's already playing. YouTube/Spotify/SoundCloud links, X (Twitter) video posts, playlists, search terms, or an **attached audio file** (mp3, wav, flac, ogg, m4a…). |
+| `a!play <link or search>` | Play a song, or queue it if one's already playing. YouTube/Spotify/SoundCloud links, X (Twitter) video posts, playlists, search terms, or an **attached audio file** (mp3, wav, flac, ogg, m4a…). Add `s` after a playlist link to shuffle it in: `a!play <playlist link> s` (links only — search terms are never touched). |
 | `a!playnext <link or search>` | Like play, but jumps the queue (plays right after the current song) |
 | `a!join` | Bring the bot into your voice channel without playing anything |
 | `a!pause` / `a!resume` | Pause / resume |
@@ -164,10 +166,12 @@ be queued anytime, on any server the bot is in.
 | `a!playlist create <name>` | New playlist on your profile |
 | `a!playlist add <name> <song>` | Add anything `a!play` accepts: links, searches, whole YouTube/Spotify playlists and SoundCloud sets (expanded into songs; SoundCloud hides most set titles until a song plays, so those save with placeholder names). Attached files can't be added this way since their Discord links expire; see `addfile`. |
 | `a!playlist addfile <name>` | Store attached audio files in your playlist (needs permission from the bot owner, see below; `a!` prefix only) |
+| `a!playlist export [profile] <name>` | Get a playlist as a text file you can back up or share (stored files are left out — their audio belongs to that profile) |
+| `a!playlist import <name>` | Create a playlist from an exported file — attach it to the message (`a!` prefix only). If the name already exists, the bot asks before adding into it; songs it already has are skipped. |
 | `a!playlist view` | List your playlists |
 | `a!playlist view <profile>` | List someone's playlists |
 | `a!playlist view [profile] <name>` | Show a playlist's songs (long lists get « First / ◀ Prev / Next ▶ / Last » page buttons) |
-| `a!playlist playall [profile] <name> [y]` | Queue a whole playlist. Add `y` at the end to shuffle it in (optional). |
+| `a!playlist playall [profile] <name> [s]` | Queue a whole playlist. Add `s` at the end to shuffle it in (optional). |
 | `a!playlist play [profile] <name> <n> <n> ...` | Queue just those numbered songs from a playlist (numbers from `a!playlist view`), in the order you list them |
 | `a!playlist move <name> <from> <to>` | Move a song to another slot |
 | `a!playlist swap <name> <x> <y>` | Swap two songs' slots |

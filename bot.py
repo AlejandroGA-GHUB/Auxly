@@ -1,6 +1,8 @@
 """Entry point. Run with: python bot.py"""
 
 import asyncio
+import contextlib
+import logging
 import os
 import re
 import sys
@@ -34,11 +36,32 @@ except OSError:
 # Windowless launches (auxly_start.bat starts the bot with pythonw so the
 # terminal can be closed) have no stdout/stderr — print() would crash on
 # None. Send output to auxly.log instead so errors stay findable.
+# Only the real bot process starts a fresh log. Windows multiprocessing uses
+# spawn, so every yt-dlp worker sources.prewarm() starts re-imports this file
+# to rebuild its namespace — opening with "w" there truncates the log out from
+# under the running bot, and the parent's next write lands past the wiped
+# bytes (the NUL padding auxly.log used to start with). Spawned children import
+# this module as "__mp_main__", so that name is the test; parent_process() is
+# NOT usable here, as multiprocessing only sets it after the import finishes.
+# Workers append, so a crash inside one is still captured rather than lost.
 LOGGING_TO_FILE = sys.stdout is None or sys.stderr is None
 if LOGGING_TO_FILE:
-    _log = open(LOG_PATH, "w", encoding="utf-8", buffering=1)
+    _log = open(LOG_PATH, "w" if __name__ == "__main__" else "a",
+                encoding="utf-8", buffering=1)
     sys.stdout = sys.stdout or _log
     sys.stderr = sys.stderr or _log
+
+# discord.py only configures logging inside bot.run(); we start via bot.start(),
+# and the library attaches a NullHandler to its own logger — which also stops
+# logging.lastResort from kicking in. Net effect without this: every error the
+# library logs (failed commands, crashed events) vanished silently. Send them
+# to the current stderr, which is auxly.log on windowless launches. WARNING
+# keeps gateway chatter out of a!log.
+logging.basicConfig(
+    stream=sys.stderr,
+    level=logging.WARNING,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 load_dotenv()
 
@@ -48,7 +71,10 @@ START_TIME = time.monotonic()
 intents = discord.Intents.default()
 intents.message_content = True  # required for prefix commands
 
-bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
+# case_insensitive: a!PLay / a!Skip etc. all work (slash needs nothing —
+# Discord forces lowercase names and its picker already matches any case).
+bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None,
+                   case_insensitive=True)
 
 
 @bot.event
@@ -69,6 +95,14 @@ async def on_command_error(ctx: commands.Context, error):
     if isinstance(error, commands.NotOwner):
         await ctx.send("Only the bot owner can do that.")
         return
+    # Anything else is a bug: say so, otherwise the command just looks dead.
+    # Re-raising sends the traceback to auxly.log (see the logging setup up
+    # top — without it the library swallows the record entirely).
+    with contextlib.suppress(discord.DiscordException):
+        await ctx.send(
+            "⚠️ That command hit an unexpected error — it's been written to "
+            f"`auxly.log` (owner: `{PREFIX}log`)."
+        )
     raise error
 
 
@@ -82,7 +116,8 @@ async def help_command(ctx: commands.Context):
         "tracks & sets, X (Twitter) video posts, playlists, and "
         "attached audio files (mp3, wav, flac, …) — just attach the file to "
         f"the `{PREFIX}play` message. (Attached files work with `{PREFIX}play` "
-        "only, not `/play`.)",
+        "only, not `/play`.) Add `s` after a playlist link to shuffle it in: "
+        f"`{PREFIX}play <playlist link> s`.",
         f"`{PREFIX}playnext <link or search>` — Like play, but jumps the queue "
         "(plays right after the current song).",
         f"`{PREFIX}join` — Bring the bot into your voice channel without "
