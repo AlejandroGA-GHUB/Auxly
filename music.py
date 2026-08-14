@@ -10,6 +10,7 @@ tax overridden (see FFMPEG_ENCODE_OPTIONS). No filters ever touch the stream.
 import asyncio
 import contextlib
 import json
+import logging
 import random
 import re
 import subprocess
@@ -32,6 +33,11 @@ EMPTY_TIMEOUT = 5 * 60  # empty voice channel: pause, then leave after 5 min
 # fixes the transient cases; discord.py itself reports it as a normal
 # end-of-stream, so without this check the song just silently "skips".
 FAILED_START_SECS = 5
+# Voice-gateway hiccups are transient: Discord occasionally stalls a connect
+# handshake, and it re-establishes dropped links on its own. Both numbers only
+# ever apply while something is already going wrong.
+VOICE_CONNECT_TIMEOUT = 20.0  # per connect attempt (discord.py default is 30)
+VOICE_RECOVER_SECS = 30       # grace for a dropped link before giving up
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 FFMPEG_OPTIONS = "-vn"
@@ -77,6 +83,38 @@ async def is_revoked(bot: commands.Bot, user: discord.abc.User,
     if await bot.is_owner(user):
         return False
     return await asyncio.to_thread(storage.is_revoked, user.id, action)
+
+
+async def connect_voice(ctx: commands.Context, channel) -> bool:
+    """Join `channel`, reporting voice trouble instead of raising. True on
+    success.
+
+    discord.py registers the VoiceClient on the guild *before* the handshake
+    and leaves it registered when the link drops or the connect times out.
+    While one is registered, `channel.connect()` refuses outright with
+    "Already connected to a voice channel" — so a client that exists but
+    isn't connected has to be force-disconnected first, or every later
+    play/join in that guild fails the same way until the bot is restarted.
+    """
+    for attempt in (1, 2):
+        vc = ctx.guild.voice_client
+        if vc is not None:
+            if vc.is_connected():
+                return True
+            with contextlib.suppress(Exception):
+                await vc.disconnect(force=True)  # drop the stale registration
+        try:
+            await channel.connect(self_deaf=True,
+                                  timeout=VOICE_CONNECT_TIMEOUT)
+            return True
+        except (asyncio.TimeoutError, discord.ClientException):
+            if attempt == 1:
+                await asyncio.sleep(1)  # let the drop settle, then retry once
+    await ctx.send(
+        "⚠️ Couldn't reach Discord's voice servers just now — give it a "
+        "moment and try again."
+    )
+    return False
 
 
 def fmt_duration(seconds: int | None) -> str:
@@ -324,6 +362,9 @@ class GuildPlayer:
         # (track, stream_url, codec) of the current song, so loop replays
         # skip the yt-dlp extraction + ffprobe (no gap, no CPU churn).
         self._stream_cache: tuple[Track, str, str | None] | None = None
+        # a!timeframe: (track, seconds) seek request the player loop consumes
+        # at the next track boundary, restarting the source from that offset.
+        self.seek_pos: tuple[Track, float] | None = None
         self.task = bot.loop.create_task(self.player_loop())
 
     # -- queue helpers ------------------------------------------------------
@@ -430,17 +471,55 @@ class GuildPlayer:
                     except asyncio.TimeoutError:
                         await self._say("💤 Idle for an hour, leaving the channel now.")
                         break
-                await self._play(track)
+                try:
+                    await self._play(track)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # One track blowing up must never take the queue with it:
+                    # before this, any unexpected error fell through to the
+                    # teardown below and silently wiped everything queued.
+                    logging.getLogger(__name__).exception(
+                        "Unexpected error playing %r", track.title
+                    )
+                    await self._say(
+                        f"⚠️ Skipping **{track.title}** — something went "
+                        "wrong (written to `auxly.log`)."
+                    )
+                    self.current = None
+                    self.loops_left = 0
+                    self._stream_cache = None
         except asyncio.CancelledError:
             raise
         finally:
             self.bot.loop.create_task(self._teardown())
 
-    async def _play(self, track: Track):
-        for attempt in (1, 2):
+    async def _await_voice(self):
+        """Wait out a dropped voice link, returning the client once it's back
+        (None if it never comes).
+
+        discord.py re-establishes dropped voice connections itself, so
+        is_connected() being briefly False at a track boundary is usually a
+        blip — tearing the player down there threw away the whole queue. A
+        real disconnect (kick, a!stop, everyone left) cancels this task via
+        destroy(), so genuine shutdowns aren't delayed by this wait.
+        """
+        deadline = time.monotonic() + VOICE_RECOVER_SECS
+        while True:
             vc = self.guild.voice_client
-            if vc is None or not vc.is_connected():
-                raise asyncio.CancelledError  # disconnected externally; shut down
+            if vc is not None and vc.is_connected():
+                return vc
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.5)
+
+    async def _play(self, track: Track):
+        attempt = 0        # failed-start tries so far (max 2)
+        start_at = 0.0     # seconds into the track — a!timeframe seeks here
+        while True:
+            vc = await self._await_voice()
+            if vc is None:
+                raise asyncio.CancelledError  # really gone; shut down
 
             try:
                 cached = self._stream_cache
@@ -460,6 +539,11 @@ class GuildPlayer:
                 # (stored upload) FFmpeg rejects them and dies instantly.
                 before = (FFMPEG_BEFORE
                           if stream_url.lower().startswith("http") else None)
+                if start_at > 0:
+                    # -ss before -i: a fast keyframe seek on the source, so it
+                    # rides the codec-copy path with zero re-encode (a!timeframe).
+                    seek_opt = f"-ss {start_at:g}"
+                    before = f"{seek_opt} {before}" if before else seek_opt
                 if codec in ("opus", "libopus"):
                     # Source is already Opus: copy the bitstream, zero re-encode.
                     source = discord.FFmpegOpusAudio(
@@ -498,8 +582,19 @@ class GuildPlayer:
 
             replay = track is self.current
             self.current = track
-            self.started_at = time.monotonic()
-            vc.play(source, after=after)
+            # Offset the clock back by the seek so elapsed/remaining still
+            # reflect the real position in the song.
+            self.started_at = time.monotonic() - start_at
+            try:
+                vc.play(source, after=after)
+            except discord.ClientException as e:
+                # e.g. the link dropped between the check above and here.
+                # Skipping one track beats killing the loop (and the queue).
+                self._stream_cache = None
+                await self._say(
+                    f"⚠️ Skipping **{track.title}** (voice error: {e})"
+                )
+                return
             if not replay:
                 self.skip_votes.clear()  # votes belong to the previous song
                 Music.histories.setdefault(self.guild.id, deque(maxlen=10)).append(track)
@@ -509,8 +604,17 @@ class GuildPlayer:
                             f"(queued by {track.requester})"
                 )
             else:
-                self.sync_controls()  # a repeat was consumed; count down the label
+                self.sync_controls()  # a repeat/seek consumed; refresh the label
             await finished.wait()
+
+            # a!timeframe: a seek stops the current source, then re-enters here
+            # to restart the SAME track from the new offset — but only while
+            # it's still the current song (a racing skip clears it first).
+            seek = self.seek_pos
+            self.seek_pos = None
+            if seek is not None and seek[0] is track and self.current is track:
+                start_at = seek[1]
+                continue
 
             if self.current is not track:
                 break  # a user skipped it; don't second-guess them
@@ -532,7 +636,8 @@ class GuildPlayer:
                         f"⚠️ **{track.title}** failed to play ({play_error}) — skipping."
                     )
                 break
-            if attempt == 2:
+            attempt += 1
+            if attempt >= 2:
                 detail = f" ({play_error})" if play_error else " (stream error)"
                 await self._say(
                     f"⚠️ **{track.title}** failed to start{detail} — skipping."
@@ -644,7 +749,9 @@ class Music(commands.Cog):
             if not join:
                 await ctx.send("I'm not playing anything right now.")
                 return False
-            await ctx.author.voice.channel.connect(self_deaf=True)
+            # connect_voice clears a dead-but-registered client first; a bare
+            # connect() would just raise "Already connected" forever.
+            return await connect_voice(ctx, ctx.author.voice.channel)
         elif vc.channel != ctx.author.voice.channel:
             await ctx.send("You need to be in **my** voice channel to control me.")
             return False
@@ -785,7 +892,8 @@ class Music(commands.Cog):
                 await vc.move_to(target)
                 await ctx.send(f"👋 Moved to **{target.name}**.")
             return
-        await target.connect(self_deaf=True)
+        if not await connect_voice(ctx, target):
+            return
         # Start a player so the usual idle/empty-channel timers apply.
         self.get_player(ctx).channel = ctx.channel
         await ctx.send(f"👋 Joined **{target.name}**.")
@@ -855,6 +963,36 @@ class Music(commands.Cog):
                 f"🔁 **{player.current.title}** will play **{count}** more "
                 f"time{'s' if count != 1 else ''} before the queue continues."
             )
+
+    @commands.hybrid_command(
+        help="Jump to a time in the current song, in seconds (e.g. a!timeframe 90).")
+    async def timeframe(self, ctx: commands.Context, seconds: int):
+        if not await self.ensure_voice(ctx):
+            return
+        player = self.players.get(ctx.guild.id)
+        vc = ctx.voice_client
+        if (player is None or player.current is None
+                or not (vc.is_playing() or vc.is_paused())):
+            await ctx.send("Nothing is playing to seek.")
+            return
+        if seconds < 0:
+            await ctx.send("The time can't be negative.")
+            return
+        track = player.current
+        if track.duration is not None and seconds >= track.duration:
+            await ctx.send(
+                f"That's past the end of **{track.title}** "
+                f"({fmt_duration(track.duration)}) — skip it instead."
+            )
+            return
+        # Hand the offset to the player loop and stop the current source so it
+        # re-enters and restarts the track from there (FFmpeg -ss + codec copy,
+        # no re-encode). A paused song resumes playing at the new spot.
+        player.seek_pos = (track, float(seconds))
+        vc.stop()
+        await ctx.send(
+            f"⏩ Jumping to `{fmt_duration(seconds)}` in **{track.title}**."
+        )
 
     def _queue_embed(self, guild_id: int, page: int) -> tuple[discord.Embed, int]:
         """One page of the queue, rendered from live state. Returns

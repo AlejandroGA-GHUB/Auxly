@@ -127,6 +127,8 @@ async def help_command(ctx: commands.Context):
         "owner enabled majority skip, this casts your skip vote instead.",
         f"`{PREFIX}loop <n>` — Repeat the current song n more times; the queue "
         f"waits until the loops finish. `{PREFIX}loop 0` cancels.",
+        f"`{PREFIX}timeframe <seconds>` — Jump to a spot in the current song, "
+        f"in seconds (`{PREFIX}timeframe 90` = 1:30).",
         f"`{PREFIX}queue` — Show the queue.",
         f"`{PREFIX}shuffle` — Shuffle the queue (playing song keeps playing).",
         f"`{PREFIX}move <n>` — Move queue slot n to the front (plays next).",
