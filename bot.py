@@ -348,7 +348,7 @@ async def show_log(ctx: commands.Context, lines: int = 20):
 @bot.command(name="shutdown", help="(Owner only) Cleanly shut the bot down.")
 @commands.is_owner()
 async def shutdown(ctx: commands.Context):
-    await ctx.send("👋 Shutting down. Bye!")
+    await ctx.send("Shutting down.")
     for vc in list(bot.voice_clients):
         await vc.disconnect(force=True)
     await bot.close()

@@ -1,6 +1,6 @@
-1.4.0
+1.4.1
 
-Release Date: 8/14/2026
+Release Date: 8/18/2026
 
 This is Auxly's release version. The bot reads the first line at startup
 and compares it against the latest release on GitHub to tell you when an

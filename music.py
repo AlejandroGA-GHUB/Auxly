@@ -29,10 +29,19 @@ IDLE_TIMEOUT = 60 * 60  # 1 hour with nothing playing -> disconnect
 EMPTY_TIMEOUT = 5 * 60  # empty voice channel: pause, then leave after 5 min
 # Playback dying faster than this (on a track that should be longer) means
 # FFmpeg never really started — usually a stream URL YouTube 403'd (it does
-# that intermittently on fresh URLs). One retry with a re-extracted URL
-# fixes the transient cases; discord.py itself reports it as a normal
+# that intermittently on fresh URLs). discord.py itself reports it as a normal
 # end-of-stream, so without this check the song just silently "skips".
 FAILED_START_SECS = 5
+# A failed start is almost always a *transient* googlevideo 403 (YouTube
+# rate-limits/edge-hiccups fresh URLs), not a dead song — so instead of dropping
+# the track, _play retries it several times, pausing between tries so the
+# rate-limit can clear. The pause also lowers our request rate, which is what
+# avoids a soft throttle snowballing into a hard one. Early tries re-open the
+# SAME still-valid URL (no extra extraction request); only the last re-extracts,
+# in case the URL is genuinely expired. Purely a recovery path — a healthy
+# stream plays out on the first try and never waits.
+MAX_START_RETRIES = 4
+RETRY_BACKOFF_SECS = (2, 4, 6, 8)  # seconds to wait before retry 1, 2, 3, 4
 # Voice-gateway hiccups are transient: Discord occasionally stalls a connect
 # handshake, and it re-establishes dropped links on its own. Both numbers only
 # ever apply while something is already going wrong.
@@ -526,14 +535,19 @@ class GuildPlayer:
                 if cached is not None and cached[0] is track:
                     _, stream_url, codec = cached  # loop replay: reuse, no re-fetch
                 else:
-                    stream_url = await sources.get_stream_url(track)
-                    codec = None
-                    for _ in range(2):  # one retry: a transient ffprobe hiccup
-                        try:            # must never force a re-encode
-                            codec = await probe_codec(stream_url)
-                            break
-                        except Exception:
-                            pass
+                    stream_url, codec = await sources.get_stream_url(track)
+                    # yt-dlp already named the codec for extracted sources, so
+                    # trust it and skip a separate ffprobe network request (one
+                    # fewer hit at YouTube per song = less rate-limiting). Only
+                    # probe when it's unknown — direct/stored files, where
+                    # ffprobe reads a LOCAL file (no network cost anyway).
+                    if codec is None:
+                        for _ in range(2):  # one retry: a transient probe hiccup
+                            try:            # must never force a re-encode
+                                codec = await probe_codec(stream_url)
+                                break
+                            except Exception:
+                                pass
                     self._stream_cache = (track, stream_url, codec)
                 # -reconnect* are HTTP protocol options; on a local file
                 # (stored upload) FFmpeg rejects them and dies instantly.
@@ -625,25 +639,42 @@ class GuildPlayer:
             )
             if play_error is None and not died_early:
                 break  # played out normally
-            # Failed start. The URL is bad — never reuse it (a loop replay
-            # would just fail again from cache). Direct file links can't be
-            # re-extracted, and a short no-error "death" may simply be a
-            # short clip, so they don't retry.
-            self._stream_cache = None
+
+            # Direct files can't 403 and can't be re-extracted; a short no-error
+            # "death" is just a short clip, so they don't retry.
             if track.direct:
+                self._stream_cache = None
                 if play_error is not None:
                     await self._say(
                         f"⚠️ **{track.title}** failed to play ({play_error}) — skipping."
                     )
                 break
+
+            # Failed *start* (died_early) = the transient-403 case: retry
+            # patiently with backoff so the song plays instead of dropping. A
+            # genuine mid-song error (it clearly played, then broke) just gets
+            # one quick re-extract retry, like before — replaying it repeatedly
+            # would be worse than skipping.
             attempt += 1
-            if attempt >= 2:
+            max_retries = MAX_START_RETRIES if died_early else 1
+            if attempt > max_retries:
                 detail = f" ({play_error})" if play_error else " (stream error)"
                 await self._say(
                     f"⚠️ **{track.title}** failed to start{detail} — skipping."
                 )
                 self.loops_left = 0  # a dead track must not loop
                 break
+            # Reuse the same still-valid URL on early tries (re-opening it after a
+            # pause lets a rate-limit clear without another extraction request);
+            # the final try re-extracts in case the URL is genuinely expired.
+            if attempt >= max_retries:
+                self._stream_cache = None
+            if died_early:
+                await asyncio.sleep(
+                    RETRY_BACKOFF_SECS[min(attempt - 1, len(RETRY_BACKOFF_SECS) - 1)]
+                )
+                if self.current is not track:
+                    break  # skipped or replaced during the backoff
 
         if self.loops_left == 0:  # song is over for good; controls with it
             await self.retire_controls()

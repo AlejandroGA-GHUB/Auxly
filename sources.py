@@ -121,10 +121,18 @@ def is_audio_file_url(url: str) -> bool:
     return path.lower().endswith(AUDIO_EXTS)
 
 
-async def get_stream_url(track: Track) -> str:
-    """Resolve a fresh bestaudio stream URL right before playback."""
+async def get_stream_url(track: Track) -> tuple[str, str | None]:
+    """Resolve a fresh bestaudio stream URL right before playback.
+
+    Returns (url, acodec). `acodec` is yt-dlp's codec name for the selected
+    format ("opus", "aac", …) — the player uses it to decide copy-vs-encode
+    WITHOUT a separate ffprobe request, which saves a network round-trip per
+    song (fewer requests = less YouTube rate-limiting). It's None for direct
+    files (no extraction) or when yt-dlp didn't report one; the player then
+    falls back to probing.
+    """
     if track.direct:
-        return track.source
+        return track.source, None
     data = await _extract(track.source, noplaylist=True)
     if "entries" in data:  # search result
         entries = [e for e in data["entries"] if e]
@@ -140,7 +148,10 @@ async def get_stream_url(track: Track) -> str:
     url = data.get("url")
     if not url:
         raise TrackError(f"No playable audio stream for: {track.title}")
-    return url
+    acodec = data.get("acodec")
+    if not acodec or acodec == "none":  # unknown → let the player probe
+        acodec = None
+    return url, acodec
 
 
 async def resolve(query: str, requester: str) -> list[Track]:
